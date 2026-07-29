@@ -14,6 +14,7 @@ from qfluentwidgets import (
 )
 
 from app.serial_utils import decode_chunk, format_hex, make_decoder, timestamp_str
+from app.ui.searchable_text_edit import SearchablePlainTextEdit
 from app.ui.terminal_widget import QTerminalWidget
 
 ENTER_MODES = {"CR": "\r", "CRLF": "\r\n", "LF": "\n"}
@@ -90,11 +91,18 @@ class ReceiveController:
                 return
             if self._timestamp:
                 text = timestamp_str() + " " + text
+
+        # 未开启自动跟随时保存当前位置。QPlainTextEdit 在光标原本位于
+        # 底部时会因 appendPlainText 自动跳到新底部，需要显式恢复。
+        sb = self._view.verticalScrollBar()
+        follow = self._autoScroll
+        old_scroll_value = sb.value()
         self._view.appendPlainText(text)
         self._truncate()
-        if self._autoScroll:
-            sb = self._view.verticalScrollBar()
+        if follow:
             sb.setValue(sb.maximum())
+        else:
+            sb.setValue(min(old_scroll_value, sb.maximum()))
 
     def _truncate(self):
         doc = self._view.document()
@@ -117,9 +125,11 @@ class ReceivePanel(QWidget):
         super().__init__(parent)
         self._rx = 0
         self._tx = 0
+        self._autoScrollEnabled = True
+        self._manualScrollPaused = False
 
         # 日志视图
-        self.view = PlainTextEdit(self)
+        self.view = SearchablePlainTextEdit(self)
         self.view.setReadOnly(True)
         self.view.setMaximumBlockCount(30000)
         self.view.setFont(QFont("Consolas", 10))
@@ -154,6 +164,8 @@ class ReceivePanel(QWidget):
         # 日志视图：手动上滚暂停自动滚动
         sb = self.view.verticalScrollBar()
         sb.sliderPressed.connect(self._onSliderPressed)
+        sb.sliderMoved.connect(self._onSliderMoved)
+        sb.actionTriggered.connect(self._onScrollAction)
         sb.rangeChanged.connect(self._onRangeChanged)
 
     def _build_toolbar(self) -> QWidget:
@@ -239,7 +251,10 @@ class ReceivePanel(QWidget):
         self._ctrl.setPaused(on)
 
     def setAutoScroll(self, on: bool):
-        self._ctrl.setAutoScroll(on)
+        self._autoScrollEnabled = bool(on)
+        # 用户显式切换时，以开关状态为准：重新开启即恢复跟随。
+        self._manualScrollPaused = False
+        self._applyAutoScroll()
 
     def clearDisplay(self):
         self._ctrl.clear()
@@ -257,10 +272,28 @@ class ReceivePanel(QWidget):
 
     def _onSliderPressed(self):
         sb = self.view.verticalScrollBar()
-        if sb.value() < sb.maximum() - 1:
-            self._ctrl.setAutoScroll(False)
+        self._updateManualScroll(sb.sliderPosition())
 
-    def _onRangeChanged(self):
+    def _onSliderMoved(self, position):
+        self._updateManualScroll(position)
+
+    def _onScrollAction(self, _action):
+        # actionTriggered 在滚轮/键盘/槽点击时于 valueChanged 之前发出，
+        # 此时 sliderPosition 已是新位置，可无等待地停止自动跟随。
+        sb = self.view.verticalScrollBar()
+        self._updateManualScroll(sb.sliderPosition())
+
+    def _onRangeChanged(self, _minimum=None, _maximum=None):
         sb = self.view.verticalScrollBar()
         if sb.value() >= sb.maximum() - 1:
-            self._ctrl.setAutoScroll(True)
+            self._manualScrollPaused = False
+            self._applyAutoScroll()
+
+    def _updateManualScroll(self, position):
+        sb = self.view.verticalScrollBar()
+        self._manualScrollPaused = int(position) < sb.maximum() - 1
+        self._applyAutoScroll()
+
+    def _applyAutoScroll(self):
+        self._ctrl.setAutoScroll(
+            self._autoScrollEnabled and not self._manualScrollPaused)

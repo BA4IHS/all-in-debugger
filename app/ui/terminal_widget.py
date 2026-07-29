@@ -26,10 +26,12 @@ from PyQt6.QtWidgets import QApplication, QMenu, QScrollBar, QWidget
 from qfluentwidgets import isDarkTheme
 
 from app.serial_utils import decode_chunk, make_decoder
+from app.ui.find_bar import FindBar
 
 # 终端面板内边距与圆角（描边画框，文本区向内缩进避免压到圆角）
 _PAD = 8
 _RADIUS = 8
+_QUEUED_FEED_CHUNK = 2048       # 单次解析控制在约一帧内，避免 ADB 大输出阻塞输入
 
 # ---------------------------------------------------------------------------
 # 调色板（VSCode 风格 16 色 + pyte typo 兼容）
@@ -54,6 +56,8 @@ DEFAULT_FG = (212, 212, 212)
 DEFAULT_BG = (30, 30, 30)
 CURSOR_COLOR = (220, 220, 220)
 SELECTION_BG = (38, 79, 120)
+FIND_BG = (90, 75, 15)          # 匹配（暗黄，终端恒深色，浅字仍可读）
+FIND_CUR_BG = (170, 120, 20)    # 当前匹配
 
 
 def resolve_color(name, is_bg: bool):
@@ -182,6 +186,12 @@ class QTerminalWidget(QWidget):
         self._decoder = make_decoder(self._codec)
         self._enter_mode = "\r"
         self._local_echo = False
+        self._feed_queue = collections.deque()
+        self._feed_head_offset = 0
+        self._queued_bytes = 0
+        self._feed_timer = QTimer(self)
+        self._feed_timer.setSingleShot(True)
+        self._feed_timer.timeout.connect(self._drain_feed_queue)
 
         self._cols = 80
         self._rows = 24
@@ -196,7 +206,7 @@ class QTerminalWidget(QWidget):
         # 滚动模型：_top_line=可见首行绝对索引；_stick=粘底(自动跟随输出)
         self._top_line = 0
         self._stick = True
-        self._gx = 14                      # 左侧滚动条预留宽度
+        self._gx = 12                      # 与普通日志一致的窄滚动条槽
 
         self._blink_on = True
         self._blink = QTimer(self)
@@ -204,7 +214,7 @@ class QTerminalWidget(QWidget):
         self._blink.timeout.connect(self._toggle_blink)
         self._blink.start()
 
-        # 左侧垂直滚动条（作为子控件叠在深色面板左侧）
+        # 右侧垂直滚动条（作为子控件叠在深色面板右侧）
         self._vbar = QScrollBar(Qt.Orientation.Vertical, self)
         self._vbar.setFixedWidth(self._gx)
         self._vbar.setRange(0, 0)
@@ -224,6 +234,26 @@ class QTerminalWidget(QWidget):
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(self._context_menu)
 
+        # 检索
+        self._find_text = ""
+        self._find_case = False
+        self._matches = []          # [(abs_row, start_cell, end_cell), ...]
+        self._cur = -1
+        self._cur_match = None
+        self._find = FindBar(self)
+        # 查找条与右侧滚动条保持间距，避免覆盖滚动槽。
+        self._find.set_right_margin(self._gx + 10)
+        self._find.textChanged.connect(self._on_find_text)
+        self._find.nextRequested.connect(self._find_next)
+        self._find.prevRequested.connect(self._find_prev)
+        self._find.caseChanged.connect(self._on_find_case)
+        self._find.closeRequested.connect(self._close_find)
+        self._find_refresh_timer = QTimer(self)
+        self._find_refresh_timer.setSingleShot(True)
+        self._find_refresh_timer.setInterval(80)
+        self._find_refresh_timer.timeout.connect(
+            lambda: self._recompute(keep_cur=True))
+
     # ── 对外 API ────────────────────────────────────────────────
 
     def feed_bytes(self, data: bytes):
@@ -231,6 +261,44 @@ class QTerminalWidget(QWidget):
         if text:
             self._stream.feed(text)
         self._after_data()
+
+    def queue_bytes(self, data: bytes):
+        """异步分片投喂大块输出，让键盘/窗口事件保持可响应。"""
+        if not data:
+            return
+        chunk = bytes(data)
+        self._feed_queue.append(chunk)
+        self._queued_bytes += len(chunk)
+        if not self._feed_timer.isActive():
+            self._feed_timer.start(0)
+
+    def queued_byte_count(self) -> int:
+        return self._queued_bytes
+
+    def discard_queued_bytes(self):
+        self._feed_timer.stop()
+        self._feed_queue.clear()
+        self._feed_head_offset = 0
+        self._queued_bytes = 0
+
+    def _drain_feed_queue(self):
+        if not self._feed_queue:
+            self._feed_head_offset = 0
+            self._queued_bytes = 0
+            return
+        head = self._feed_queue[0]
+        start = self._feed_head_offset
+        end = min(len(head), start + _QUEUED_FEED_CHUNK)
+        chunk = head[start:end]
+        if end >= len(head):
+            self._feed_queue.popleft()
+            self._feed_head_offset = 0
+        else:
+            self._feed_head_offset = end
+        self._queued_bytes -= len(chunk)
+        self.feed_bytes(chunk)
+        if self._feed_queue:
+            self._feed_timer.start(0)
 
     def set_codec(self, codec: str):
         if codec != self._codec:
@@ -244,12 +312,17 @@ class QTerminalWidget(QWidget):
         self._local_echo = bool(on)
 
     def clear(self):
+        self.discard_queued_bytes()
+        self._find_refresh_timer.stop()
+        self._decoder = make_decoder(self._codec)
         self._screen.reset()
         self._screen.reset_scrollback()
         self._top_line = 0
         self._stick = True
         self._sel_anchor = self._sel_current = None
         self._sync_vbar()
+        if self._find_text:
+            self._recompute(keep_cur=False)
         self.update()
 
     def set_font_size(self, pt: int):
@@ -270,7 +343,8 @@ class QTerminalWidget(QWidget):
         area_h = max(1, self.height() - 2 * _PAD)
         cols = max(2, area_w // self._cell_w)
         rows = max(2, area_h // self._cell_h)
-        if cols != self._cols or rows != self._rows:
+        changed = cols != self._cols or rows != self._rows
+        if changed:
             self._cols, self._rows = cols, rows
             self._screen.resize(rows, cols)
         mt = self._max_top()
@@ -280,6 +354,8 @@ class QTerminalWidget(QWidget):
             self._top_line = min(self._top_line, mt)
         self._sync_vbar()
         self._layout_vbar()
+        if changed and self._find_text:
+            self._recompute(keep_cur=True)
         self.update()
 
     def _total_lines(self):
@@ -299,6 +375,9 @@ class QTerminalWidget(QWidget):
         elif self._top_line > mt:
             self._top_line = mt
         self._sync_vbar()
+        if self._find_text:
+            # ADB 大输出可能被拆成数百块；合并查找刷新，避免每块都全量扫描。
+            self._find_refresh_timer.start()
         self.update()
 
     def _sync_vbar(self):
@@ -316,7 +395,8 @@ class QTerminalWidget(QWidget):
         self.update()
 
     def _layout_vbar(self):
-        self._vbar.setGeometry(0, 0, self._gx, self.height())
+        self._vbar.setGeometry(max(0, self.width() - self._gx),
+                               0, self._gx, self.height())
 
     def _jump_bottom(self):
         self._stick = True
@@ -381,7 +461,7 @@ class QTerminalWidget(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         w, h = self.width(), self.height()
         W, H = self._cell_w, self._cell_h
-        ox, oy = self._gx + _PAD, _PAD     # 文本区让开左侧滚动条
+        ox, oy = _PAD, _PAD                # 右侧为滚动条预留空间
 
         # 圆角深色面板（终端始终深色，做成带描边的画框面板）
         path = QPainterPath()
@@ -399,6 +479,7 @@ class QTerminalWidget(QWidget):
         for r in range(self._rows):
             line = self._doc_line(first + r)
             y = oy + r * H
+            row_marks = self._row_marks(first + r)
             c = 0
             while c < self._cols:
                 ch = line[c]
@@ -417,7 +498,12 @@ class QTerminalWidget(QWidget):
 
                 bg = resolve_color(bg_name, True)
                 in_sel = sel is not None and self._in_sel(first + r, c, sel)
-                if in_sel:
+                m = row_marks[c] if c < len(row_marks) else 0
+                if m == 2:
+                    painter.fillRect(ox + c * W, y, ww * W, H, QColor(*FIND_CUR_BG))
+                elif m == 1:
+                    painter.fillRect(ox + c * W, y, ww * W, H, QColor(*FIND_BG))
+                elif in_sel:
                     painter.fillRect(ox + c * W, y, ww * W, H, QColor(*SELECTION_BG))
                 elif bg != DEFAULT_BG:
                     painter.fillRect(ox + c * W, y, ww * W, H, QColor(*bg))
@@ -471,7 +557,7 @@ class QTerminalWidget(QWidget):
 
     def _cell_at(self, pos):
         # 坐标为 QPointF，// 在 Python 下得 float，必须 int()，否则 selected_text 的 range() 崩溃
-        col = int((pos.x() - self._gx - _PAD) // self._cell_w)
+        col = int((pos.x() - _PAD) // self._cell_w)
         row = int((pos.y() - _PAD) // self._cell_h)
         col = min(self._cols - 1, max(0, col))
         row = min(self._rows - 1, max(0, row))
@@ -555,12 +641,15 @@ class QTerminalWidget(QWidget):
         m = QMenu(self)
         copy_act = m.addAction("复制")
         paste_act = m.addAction("粘贴")
+        find_act = m.addAction("查找")
         clear_act = m.addAction("清屏")
         act = m.exec(self.mapToGlobal(pos))
         if act == copy_act:
             self._copy()
         elif act == paste_act:
             self._paste()
+        elif act == find_act:
+            self._open_find()
         elif act == clear_act:
             self.clear()
 
@@ -574,10 +663,145 @@ class QTerminalWidget(QWidget):
         if text:
             self.sendRequested.emit(text.encode(self._codec, "replace"))
 
+    # ── 检索 ────────────────────────────────────────────────────
+
+    def _open_find(self):
+        pre = self.selected_text().replace("\n", " ").strip()
+        self._find.open(pre)
+
+    def _close_find(self):
+        self._find_refresh_timer.stop()
+        self._find.hide()
+        self._find_text = ""
+        self._matches = []
+        self._cur = -1
+        self._cur_match = None
+        self.setFocus()
+        self.update()
+
+    def _on_find_text(self, text: str):
+        self._find_text = text
+        self._recompute(keep_cur=False)
+
+    def _on_find_case(self, on: bool):
+        self._find_case = bool(on)
+        self._recompute(keep_cur=False)
+
+    def _recompute(self, keep_cur=False):
+        q = self._find_text
+        self._matches = []
+        if q:
+            needle = q if self._find_case else q.lower()
+            for absr in range(self._total_lines()):
+                line = self._doc_line(absr)
+                chars, gcols, widths = [], [], []
+                c = 0
+                while c < self._cols:
+                    d = line[c].data
+                    if d != "":
+                        chars.append(d)
+                        gcols.append(c)
+                        widths.append(max(1, _wcw(d) or 1))
+                    c += 1
+                if not chars:
+                    continue
+                hay = "".join(chars)
+                if not self._find_case:
+                    hay = hay.lower()
+                s = 0
+                L = len(needle)
+                while True:
+                    i = hay.find(needle, s)
+                    if i < 0:
+                        break
+                    e = i + L
+                    cs = gcols[i]
+                    ce = gcols[e - 1] + widths[e - 1] - 1
+                    self._matches.append((absr, cs, ce))
+                    s = e
+        n = len(self._matches)
+        if keep_cur:
+            if n == 0:
+                self._set_cur(-1)
+            elif self._cur >= n:
+                self._set_cur(n - 1)
+            else:
+                self._set_cur(self._cur)
+        else:
+            self._set_cur(0 if n else -1)
+        if not keep_cur and self._cur >= 0:
+            self._scroll_to_match()
+        self.update()
+
+    def _set_cur(self, i):
+        n = len(self._matches)
+        self._cur = i if (n and i >= 0) else -1
+        self._cur_match = self._matches[self._cur] if self._cur >= 0 else None
+        self._find.set_count(self._cur + 1 if self._cur >= 0 else 0, n)
+
+    def _find_next(self):
+        n = len(self._matches)
+        if not n:
+            return
+        self._set_cur((self._cur + 1) % n)
+        self._scroll_to_match()
+        self.update()
+
+    def _find_prev(self):
+        n = len(self._matches)
+        if not n:
+            return
+        self._set_cur((self._cur - 1) % n)
+        self._scroll_to_match()
+        self.update()
+
+    def _scroll_to_match(self):
+        if self._cur < 0:
+            return
+        self._scroll_to_row(self._matches[self._cur][0])
+
+    def _scroll_to_row(self, r):
+        mt = self._max_top()
+        if r < self._top_line:
+            t = r
+        elif r >= self._top_line + self._rows:
+            t = r - self._rows + 1
+        else:
+            t = self._top_line
+        t = max(0, min(mt, t))
+        self._top_line = t
+        self._stick = t >= mt
+        self._sync_vbar()
+
+    def _row_marks(self, abs_row):
+        if not self._matches:
+            return ()
+        marks = None
+        for m in self._matches:
+            if m[0] != abs_row:
+                continue
+            if marks is None:
+                marks = [0] * self._cols
+            v = 2 if m == self._cur_match else 1
+            lo = max(0, m[1])
+            hi = min(self._cols - 1, m[2])
+            for cc in range(lo, hi + 1):
+                marks[cc] = v if v == 2 else max(marks[cc], 1)
+        return marks or ()
+
     # ── 键盘 ────────────────────────────────────────────────────
 
     def keyPressEvent(self, e: QKeyEvent):
         from PyQt6.QtCore import Qt as _Qt
+        # 检索：检索条开启时 Esc 关闭（不发给设备）；Ctrl+F 打开
+        if self._find.isVisible() and e.key() == _Qt.Key.Key_Escape:
+            self._close_find()
+            return
+        if (e.modifiers() & _Qt.KeyboardModifier.ControlModifier) \
+                and not (e.modifiers() & _Qt.KeyboardModifier.ShiftModifier) \
+                and e.key() == _Qt.Key.Key_F:
+            self._open_find()
+            return
         # 复制 / 粘贴快捷键
         if e.modifiers() & _Qt.KeyboardModifier.ControlModifier and \
                 e.modifiers() & _Qt.KeyboardModifier.ShiftModifier:
@@ -628,7 +852,9 @@ class QTerminalWidget(QWidget):
     def resizeEvent(self, e):
         super().resizeEvent(e)
         self._refit()
+        self._find.place()
 
     def showEvent(self, e):
         super().showEvent(e)
         self._refit()
+        self._find.place()

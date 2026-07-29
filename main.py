@@ -12,6 +12,7 @@ from qfluentwidgets import setTheme
 
 from app.config import cfg, loadConfig, qconfig
 from app.ui.main_window import MainWindow
+from app.ui.scrollbar_style import apply_white_scrollbars, install_white_scrollbars
 
 
 def main():
@@ -20,8 +21,10 @@ def main():
     app = QApplication(sys.argv)
     loadConfig()
     setTheme(qconfig.get(cfg.themeMode))
+    install_white_scrollbars(app)
 
     window = MainWindow()
+    apply_white_scrollbars(window)
     window.show()
     sys.exit(app.exec())
 
