@@ -1,13 +1,15 @@
 # coding: utf-8
 """ADB 执行与配置解析核心。
 
-- find_adb / adb_version / list_adb_devices：同步 subprocess，用于手动刷新（快）
+- find_adb：仅做本地路径解析
+- adb_version / list_adb_devices：同步辅助，仅供测试或后台线程使用
+- AdbProbe：基于 QProcess 的异步探测，供 UI 刷新版本和设备列表
 - list_profiles / load_profile：从目录读取型号 profile（每型号一个 JSON）
 - AdbShellProcess：交互式 `adb -s <serial> shell -t`（QProcess，异步，UI 线程）
 - AdbCommandRunner：顺序执行 profile 命令（`adb -s <serial> shell <cmd>`），
   输出流式投喂，命令间用 ANSI 分隔标题（终端会渲染颜色）
 
-QProcess 非阻塞，无需工作线程；pyserial 才需要线程。
+所有 UI 触发的 adb 调用都应走 QProcess，不能在主线程调用 subprocess.run。
 """
 import json
 import os
@@ -17,7 +19,7 @@ import subprocess
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-from PyQt6.QtCore import QObject, QProcess, pyqtSignal
+from PyQt6.QtCore import QObject, QProcess, QTimer, pyqtSignal
 
 # ---------------------------------------------------------------------------
 # adb 定位 / 版本 / 设备列表（同步）
@@ -40,8 +42,35 @@ def adb_version(adb_path: str) -> Tuple[Optional[str], str]:
                            text=True, timeout=6, creationflags=_hide_console())
     except Exception as e:
         return None, str(e)
-    line = (r.stdout or r.stderr or "").strip().splitlines()
-    return (line[0] if line else None), ""
+    out = ((r.stdout or "") + "\n" + (r.stderr or "")).strip()
+    version = adb_version_line(out)
+    lines = out.splitlines()
+    return (version or (lines[0] if lines else None)), ""
+
+
+_ADB_VERSION_RE = re.compile(
+    r"Android Debug Bridge version\s+(\d+)\.(\d+)\.(\d+)",
+    re.IGNORECASE,
+)
+
+
+def parse_adb_version(out: str):
+    """从混合 stdout/stderr 中提取 (major, minor, patch)；找不到返回 None。"""
+    match = _ADB_VERSION_RE.search(out or "")
+    return tuple(int(v) for v in match.groups()) if match else None
+
+
+def adb_version_line(out: str) -> str:
+    """返回真实版本行，忽略 server mismatch/daemon 启动等前置输出。"""
+    for line in (out or "").splitlines():
+        if _ADB_VERSION_RE.search(line):
+            return line.strip()
+    return ""
+
+
+def is_legacy_adb_version(version) -> bool:
+    """1.0.39 等旧客户端在部分设备的交互 PTY 上会出现数秒级延迟。"""
+    return version is not None and tuple(version) < (1, 0, 40)
 
 
 def list_adb_devices(adb_path: str) -> Tuple[List[dict], str]:
@@ -75,6 +104,143 @@ def _hide_console() -> int:
     if os.name == "nt":
         return getattr(subprocess, "CREATE_NO_WINDOW", 0)
     return 0
+
+
+def _dispose_process_async(p: QProcess, retired=None) -> None:
+    """终止进程并在 finished 后销毁，不阻塞 UI。"""
+    if p.state() == QProcess.ProcessState.NotRunning:
+        p.deleteLater()
+        return
+    if retired is not None:
+        retired.add(p)
+
+    def cleanup(_code, _status, p=p):
+        if retired is not None:
+            retired.discard(p)
+        p.deleteLater()
+
+    p.finished.connect(cleanup)
+    p.kill()
+
+
+def _reap_process_on_shutdown(p: QProcess, timeout_ms=1000) -> None:
+    """仅用于应用退出：确保父 QObject 销毁前子进程已经退出。"""
+    p.blockSignals(True)
+    if p.state() != QProcess.ProcessState.NotRunning:
+        p.kill()
+        p.waitForFinished(max(1, int(timeout_ms)))
+    p.deleteLater()
+
+
+def _reap_retired_processes(retired) -> None:
+    for p in list(retired):
+        _reap_process_on_shutdown(p)
+    retired.clear()
+
+
+# ---------------------------------------------------------------------------
+# UI 异步探测
+# ---------------------------------------------------------------------------
+
+class AdbProbe(QObject):
+    """带超时、可取消的异步子进程探测器。
+
+    finished(data, exit_code, error)：
+    - 正常结束时 error 为空，data 为合并后的 stdout/stderr
+    - 启动失败、超时或进程崩溃时 error 非空
+    """
+
+    finished = pyqtSignal(bytes, int, str)
+    busyChanged = pyqtSignal(bool)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._proc: Optional[QProcess] = None
+        self._retired = set()
+        self._buffer = bytearray()
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.timeout.connect(self._on_timeout)
+
+    def is_running(self) -> bool:
+        return self._proc is not None
+
+    def start(self, program: str, arguments, timeout_ms: int = 6000):
+        """立即返回；同一探测器上一次未完成的任务会被安全取消。"""
+        self._cancel(emit_busy=False)
+        self._buffer.clear()
+
+        p = QProcess(self)
+        p.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
+        p.readyReadStandardOutput.connect(lambda p=p: self._on_read(p))
+        p.finished.connect(
+            lambda code, status, p=p: self._on_finished(p, code, status))
+        p.errorOccurred.connect(lambda error, p=p: self._on_error(p, error))
+        self._proc = p
+        self.busyChanged.emit(True)
+        self._timer.start(max(1, int(timeout_ms)))
+        p.start(program, [str(a) for a in arguments])
+
+    def cancel(self):
+        self._cancel(emit_busy=True)
+
+    def shutdown(self):
+        p = self._proc
+        if p is None:
+            _reap_retired_processes(self._retired)
+            return
+        self._proc = None
+        self._timer.stop()
+        _reap_process_on_shutdown(p)
+        _reap_retired_processes(self._retired)
+
+    def _cancel(self, emit_busy: bool):
+        p = self._proc
+        if p is None:
+            return
+        self._proc = None
+        self._timer.stop()
+        _dispose_process_async(p, self._retired)
+        if emit_busy:
+            self.busyChanged.emit(False)
+
+    def _on_read(self, p: QProcess):
+        if p is not self._proc:
+            return
+        data = p.readAllStandardOutput()
+        if data:
+            self._buffer.extend(bytes(data))
+
+    def _on_finished(self, p: QProcess, code, _status):
+        self._finish(p, int(code), "")
+
+    def _on_error(self, p: QProcess, _error):
+        if p is not self._proc:
+            return
+        self._finish(
+            p, -1, p.errorString() or "ADB 进程启动失败",
+            kill=p.state() != QProcess.ProcessState.NotRunning)
+
+    def _on_timeout(self):
+        p = self._proc
+        if p is None:
+            return
+        self._finish(p, -1, "ADB 响应超时（已终止本次操作）", kill=True)
+
+    def _finish(self, p: QProcess, code: int, error: str, kill=False):
+        if p is not self._proc:
+            return
+        self._on_read(p)
+        data = bytes(self._buffer)
+        self._buffer.clear()
+        self._proc = None                 # 先摘除，忽略 kill 后的迟到信号
+        self._timer.stop()
+        if kill:
+            _dispose_process_async(p, self._retired)
+        else:
+            p.deleteLater()
+        self.busyChanged.emit(False)
+        self.finished.emit(data, int(code), error)
 
 
 # ---------------------------------------------------------------------------
@@ -140,6 +306,7 @@ class AdbShellProcess(QObject):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._proc: Optional[QProcess] = None
+        self._retired = set()
 
     def is_running(self) -> bool:
         return self._proc is not None and \
@@ -150,10 +317,11 @@ class AdbShellProcess(QObject):
             return
         p = QProcess(self)
         p.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
-        p.readyReadStandardOutput.connect(self._on_read)
+        p.readyReadStandardOutput.connect(lambda p=p: self._on_read(p))
         p.started.connect(self.started.emit)
-        p.finished.connect(self._on_finished)
-        p.errorOccurred.connect(self._on_error)
+        p.finished.connect(
+            lambda code, status, p=p: self._on_finished(p, code, status))
+        p.errorOccurred.connect(lambda error, p=p: self._on_error(p, error))
         self._proc = p
         # -t 强制 PTY：远程 /bin/sh 才交互、有提示符、能出 ANSI 颜色
         p.start(adb, ["-s", serial, "shell", "-t"])
@@ -166,25 +334,45 @@ class AdbShellProcess(QObject):
         p = self._proc
         if p is None:
             return
-        try:
-            p.terminate()
-            if not p.waitForFinished(800):
-                p.kill()
-                p.waitForFinished(300)
-        except Exception:
-            pass
+        # terminate/kill 都是异步的，不能在 UI 线程 waitForFinished。
+        p.terminate()
+        QTimer.singleShot(800, lambda p=p: self._kill_if_current(p))
 
-    def _on_read(self):
-        d = self._proc.readAllStandardOutput()
+    def shutdown(self):
+        """窗口关闭专用：立即杀进程并屏蔽迟到信号。"""
+        p = self._proc
+        if p is None:
+            _reap_retired_processes(self._retired)
+            return
+        self._proc = None
+        _reap_process_on_shutdown(p)
+        _reap_retired_processes(self._retired)
+
+    def _kill_if_current(self, p: QProcess):
+        if p is self._proc and \
+                p.state() != QProcess.ProcessState.NotRunning:
+            p.kill()
+
+    def _on_read(self, p: QProcess):
+        if p is not self._proc:
+            return
+        d = p.readAllStandardOutput()
         if d:
             self.dataReceived.emit(bytes(d))
 
-    def _on_finished(self, code, _status):
+    def _on_finished(self, p: QProcess, code, _status):
+        if p is not self._proc:
+            return
+        self._on_read(p)
         self._proc = None
+        p.deleteLater()
         self.stopped.emit(int(code), "")
 
-    def _on_error(self, err):
+    def _on_error(self, p: QProcess, err):
+        if p is not self._proc:
+            return
         self._proc = None
+        _dispose_process_async(p, self._retired)
         self.stopped.emit(-1, f"adb 进程错误({getattr(err, 'value', err)})")
 
 
@@ -206,6 +394,7 @@ class AdbCommandRunner(QObject):
         super().__init__(parent)
         self._queue: List[Tuple[str, str]] = []   # (name, cmd)
         self._proc: Optional[QProcess] = None
+        self._retired = set()
         self._cur_name = ""
         self._adb = ""
         self._serial = ""
@@ -232,11 +421,21 @@ class AdbCommandRunner(QObject):
 
     def cancel(self):
         self._queue.clear()
-        if self._proc is not None:
-            try:
-                self._proc.kill()
-            except Exception:
-                pass
+        p = self._proc
+        if p is None:
+            return
+        self._proc = None
+        _dispose_process_async(p, self._retired)
+
+    def shutdown(self):
+        self._queue.clear()
+        p = self._proc
+        if p is None:
+            _reap_retired_processes(self._retired)
+            return
+        self._proc = None
+        _reap_process_on_shutdown(p)
+        _reap_retired_processes(self._retired)
 
     def _enc(self, s: str) -> bytes:
         return s.encode(self._codec, "replace")
@@ -252,25 +451,42 @@ class AdbCommandRunner(QObject):
 
         p = QProcess(self)
         p.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
-        p.readyReadStandardOutput.connect(self._on_read)
-        p.finished.connect(self._on_finished)
-        p.errorOccurred.connect(self._on_error)
+        p.readyReadStandardOutput.connect(lambda p=p: self._on_read(p))
+        p.finished.connect(
+            lambda code, status, p=p: self._on_finished(code, status, p))
+        p.errorOccurred.connect(
+            lambda error, p=p: self._on_error(error, p))
         self._proc = p
         p.start(self._adb, ["-s", self._serial, "shell", cmd])
 
-    def _on_read(self):
-        d = self._proc.readAllStandardOutput()
+    def _on_read(self, p=None):
+        p = p or self._proc
+        if p is None or p is not self._proc:
+            return
+        d = p.readAllStandardOutput()
         if d:
             self.dataReceived.emit(bytes(d))
 
-    def _on_finished(self, code, _status):
+    def _on_finished(self, code, _status, p=None):
+        p = p or self._proc
+        if p is None or p is not self._proc:
+            return
+        self._on_read(p)
         self._proc = None
+        p.deleteLater()
         self.dataReceived.emit(self._enc(_FOOT.format(code=int(code))))
         self.commandFinished.emit(self._cur_name, int(code))
         self._start_next()
 
-    def _on_error(self, err):
-        self._proc = None
+    def _on_error(self, err, p=None):
+        # 保留 p=None，便于纯逻辑测试直接验证异常枚举格式。
+        if p is not None and p is not self._proc:
+            return
+        if p is not None:
+            self._proc = None
+            _dispose_process_async(p, self._retired)
+        else:
+            self._proc = None
         self.dataReceived.emit(
             self._enc(f"\x1b[31m[adb 错误 {getattr(err, 'value', err)}]\x1b[0m\r\n"))
         self.commandFinished.emit(self._cur_name, -1)

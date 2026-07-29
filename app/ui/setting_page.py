@@ -2,7 +2,7 @@
 """设置页：本版本 qfluentwidgets 无 SettingInterface，
 用 ScrollArea + SettingCardGroup + SettingCard 族手工搭建。
 """
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtWidgets import QFileDialog, QHBoxLayout, QVBoxLayout, QWidget
 
 from qfluentwidgets import (
@@ -72,6 +72,10 @@ class SettingPage(ScrollArea):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._adbVersionProbe = ar.AdbProbe(self)
+        self._adbVersionProbe.finished.connect(self._onAdbVersionReady)
+        self._adbVersionPath = ""
+        self._shuttingDown = False
         self.setWidgetResizable(True)
         self.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -129,9 +133,9 @@ class SettingPage(ScrollArea):
     def _buildAdb(self):
         group = SettingCardGroup("ADB", self._container)
         path0, _ = ar.find_adb(qconfig.get(cfg.adbPath))
-        ver, _ = ar.adb_version(path0) if path0 else (None, "")
         shown = path0 or (qconfig.get(cfg.adbPath) or "adb")
-        content = f"{shown}  |  {ver or '未检测到，点浏览选择'}"
+        status = "正在检测…" if path0 else "未检测到，点浏览选择"
+        content = f"{shown}  |  {status}"
         self.adbCard = PushSettingCard(
             "浏览…", FluentIcon.FOLDER, "adb 可执行文件", content, parent=group)
         self.adbCard.clicked.connect(self._chooseAdb)
@@ -140,6 +144,8 @@ class SettingPage(ScrollArea):
         self.modelCard = _AdbModelCard(group)
         group.addSettingCard(self.modelCard)
         self._expand.addWidget(group)
+        if path0:
+            QTimer.singleShot(0, lambda path=path0: self._probeAdbVersion(path))
 
     def _chooseAdb(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -147,8 +153,28 @@ class SettingPage(ScrollArea):
         if not path:
             return
         qconfig.set(cfg.adbPath, path)
-        ver, _ = ar.adb_version(path)
-        self.adbCard.setContent(f"{path}  |  {ver or '版本未知'}")
+        self.adbCard.setContent(f"{path}  |  正在检测…")
+        self._probeAdbVersion(path)
+
+    def _probeAdbVersion(self, path: str):
+        if self._shuttingDown:
+            return
+        self._adbVersionPath = path
+        self._adbVersionProbe.start(path, ["version"], timeout_ms=6000)
+
+    def _onAdbVersionReady(self, data: bytes, code: int, error: str):
+        text = data.decode("utf-8", "replace").strip()
+        version = ar.adb_version_line(text)
+        version_tuple = ar.parse_adb_version(text)
+        if code != 0 and not error:
+            error = text.splitlines()[0] if text else f"退出码 {code}"
+        if error:
+            shown = f"检测失败：{error}"
+        elif ar.is_legacy_adb_version(version_tuple):
+            shown = f"{version or '版本未知'}（过旧，建议 1.0.40+）"
+        else:
+            shown = version or "版本未知"
+        self.adbCard.setContent(f"{self._adbVersionPath}  |  {shown}")
 
     def _chooseLogDir(self):
         path = QFileDialog.getExistingDirectory(self, "选择日志目录")
@@ -156,3 +182,7 @@ class SettingPage(ScrollArea):
             return
         qconfig.set(cfg.logDir, path)
         self.logCard.contentLabel.setText(path)
+
+    def shutdown(self):
+        self._shuttingDown = True
+        self._adbVersionProbe.shutdown()
