@@ -21,7 +21,7 @@ from PyQt6.QtGui import (
     QColor, QFont, QFontMetrics, QKeyEvent, QPainter, QPainterPath, QPen,
     QMouseEvent,
 )
-from PyQt6.QtWidgets import QApplication, QMenu, QWidget
+from PyQt6.QtWidgets import QApplication, QMenu, QScrollBar, QWidget
 
 from qfluentwidgets import isDarkTheme
 
@@ -193,12 +193,28 @@ class QTerminalWidget(QWidget):
                                     if False else QFont.StyleStrategy.PreferAntialias)
         self._recalc_metrics()
 
-        self._view_offset = 0          # 0=实时；>0=向上回滚的行数
+        # 滚动模型：_top_line=可见首行绝对索引；_stick=粘底(自动跟随输出)
+        self._top_line = 0
+        self._stick = True
+        self._gx = 14                      # 左侧滚动条预留宽度
+
         self._blink_on = True
         self._blink = QTimer(self)
         self._blink.setInterval(530)
         self._blink.timeout.connect(self._toggle_blink)
         self._blink.start()
+
+        # 左侧垂直滚动条（作为子控件叠在深色面板左侧）
+        self._vbar = QScrollBar(Qt.Orientation.Vertical, self)
+        self._vbar.setFixedWidth(self._gx)
+        self._vbar.setRange(0, 0)
+        self._vbar.valueChanged.connect(self._on_vbar)
+
+        # 拖选越过上/下边缘时自动滚动并延伸选区
+        self._drag_dir = 0
+        self._drag_timer = QTimer(self)
+        self._drag_timer.setInterval(80)
+        self._drag_timer.timeout.connect(self._drag_scroll_step)
 
         # 选择 (abs_row, col)
         self._sel_anchor = None
@@ -214,7 +230,7 @@ class QTerminalWidget(QWidget):
         text = decode_chunk(self._decoder, data)
         if text:
             self._stream.feed(text)
-        self.update()
+        self._after_data()
 
     def set_codec(self, codec: str):
         if codec != self._codec:
@@ -230,8 +246,10 @@ class QTerminalWidget(QWidget):
     def clear(self):
         self._screen.reset()
         self._screen.reset_scrollback()
-        self._view_offset = 0
+        self._top_line = 0
+        self._stick = True
         self._sel_anchor = self._sel_current = None
+        self._sync_vbar()
         self.update()
 
     def set_font_size(self, pt: int):
@@ -248,21 +266,89 @@ class QTerminalWidget(QWidget):
         self._ascent = fm.ascent()
 
     def _refit(self):
-        area_w = max(1, self.width() - 2 * _PAD)
+        area_w = max(1, self.width() - self._gx - 2 * _PAD)
         area_h = max(1, self.height() - 2 * _PAD)
         cols = max(2, area_w // self._cell_w)
         rows = max(2, area_h // self._cell_h)
         if cols != self._cols or rows != self._rows:
             self._cols, self._rows = cols, rows
             self._screen.resize(rows, cols)
-            self._view_offset = 0
-            self.update()
+        mt = self._max_top()
+        if self._stick:
+            self._top_line = mt
+        else:
+            self._top_line = min(self._top_line, mt)
+        self._sync_vbar()
+        self._layout_vbar()
+        self.update()
 
     def _total_lines(self):
         return len(self._screen.scrollback) + self._screen.lines
 
     def _first_abs(self):
-        return max(0, self._total_lines() - self._rows - self._view_offset)
+        return self._top_line
+
+    def _max_top(self):
+        return max(0, self._total_lines() - self._rows)
+
+    def _after_data(self):
+        """新数据到达：粘底则跟随；已上翻则保持当前顶行，不被新数据拽走。"""
+        mt = self._max_top()
+        if self._stick:
+            self._top_line = mt
+        elif self._top_line > mt:
+            self._top_line = mt
+        self._sync_vbar()
+        self.update()
+
+    def _sync_vbar(self):
+        mt = self._max_top()
+        self._vbar.blockSignals(True)
+        self._vbar.setRange(0, mt)
+        self._vbar.setPageStep(max(1, self._rows))
+        self._vbar.setValue(self._top_line)
+        self._vbar.setEnabled(mt > 0)
+        self._vbar.blockSignals(False)
+
+    def _on_vbar(self, value):
+        self._top_line = int(value)
+        self._stick = self._top_line >= self._max_top()
+        self.update()
+
+    def _layout_vbar(self):
+        self._vbar.setGeometry(0, 0, self._gx, self.height())
+
+    def _jump_bottom(self):
+        self._stick = True
+        self._top_line = self._max_top()
+        self._sync_vbar()
+        self.update()
+
+    def _scroll_up(self, n):
+        self._top_line = max(0, self._top_line - n)
+        self._stick = self._top_line >= self._max_top()
+        self._sync_vbar()
+        self.update()
+
+    def _scroll_down(self, n):
+        self._top_line = min(self._max_top(), self._top_line + n)
+        self._stick = self._top_line >= self._max_top()
+        self._sync_vbar()
+        self.update()
+
+    def _drag_scroll_step(self):
+        if self._sel_anchor is None:
+            self._drag_timer.stop()
+            return
+        if self._drag_dir < 0:
+            self._scroll_up(1)
+            self._sel_current = (self._first_abs(), 0)
+        elif self._drag_dir > 0:
+            self._scroll_down(1)
+            self._sel_current = (min(self._first_abs() + self._rows - 1,
+                                     self._total_lines() - 1),
+                                 self._cols - 1)
+        self.update()
 
     def _doc_line(self, abs_row):
         sb = self._screen.scrollback
@@ -295,7 +381,7 @@ class QTerminalWidget(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         w, h = self.width(), self.height()
         W, H = self._cell_w, self._cell_h
-        ox, oy = _PAD, _PAD
+        ox, oy = self._gx + _PAD, _PAD     # 文本区让开左侧滚动条
 
         # 圆角深色面板（终端始终深色，做成带描边的画框面板）
         path = QPainterPath()
@@ -341,8 +427,8 @@ class QTerminalWidget(QWidget):
                     painter.drawText(QPointF(ox + c * W, y + self._ascent), data)
                 c += ww
 
-        # 光标（仅实时视图且可见）
-        if self._view_offset == 0 and self._blink_on and self.hasFocus():
+        # 光标（仅粘底实时视图且可见）
+        if self._stick and self._blink_on and self.hasFocus():
             cx, cy = self._screen.cursor.x, self._screen.cursor.y
             if 0 <= cy < self._rows:
                 cr = QRect(ox + cx * W, oy + cy * H, W, H)
@@ -385,7 +471,7 @@ class QTerminalWidget(QWidget):
 
     def _cell_at(self, pos):
         # 坐标为 QPointF，// 在 Python 下得 float，必须 int()，否则 selected_text 的 range() 崩溃
-        col = int((pos.x() - _PAD) // self._cell_w)
+        col = int((pos.x() - self._gx - _PAD) // self._cell_w)
         row = int((pos.y() - _PAD) // self._cell_h)
         col = min(self._cols - 1, max(0, col))
         row = min(self._rows - 1, max(0, row))
@@ -429,21 +515,41 @@ class QTerminalWidget(QWidget):
 
     def mousePressEvent(self, e: QMouseEvent):
         if e.button() == Qt.MouseButton.LeftButton:
+            self._drag_timer.stop()
+            self._drag_dir = 0
             self._sel_anchor = self._sel_current = self._cell_at(e.position())
+            self.setFocus()
             self.update()
         super().mousePressEvent(e)
 
     def mouseMoveEvent(self, e: QMouseEvent):
         if self._sel_anchor is not None and e.buttons() & Qt.MouseButton.LeftButton:
             self._sel_current = self._cell_at(e.position())
+            self._update_drag(e.position().y())
             self.update()
         super().mouseMoveEvent(e)
 
     def mouseReleaseEvent(self, e: QMouseEvent):
         if e.button() == Qt.MouseButton.LeftButton and self._sel_anchor is not None:
             self._sel_current = self._cell_at(e.position())
+            self._drag_timer.stop()
+            self._drag_dir = 0
             self.update()
         super().mouseReleaseEvent(e)
+
+    def _update_drag(self, y):
+        edge = 24
+        if y < edge:
+            d = -1
+        elif y > self.height() - edge:
+            d = 1
+        else:
+            d = 0
+        self._drag_dir = d
+        if d and not self._drag_timer.isActive():
+            self._drag_timer.start()
+        elif not d:
+            self._drag_timer.stop()
 
     def _context_menu(self, pos):
         m = QMenu(self)
@@ -482,9 +588,9 @@ class QTerminalWidget(QWidget):
 
         # 翻页
         if e.key() == _Qt.Key.Key_PageUp:
-            self._scroll(3); return
+            self._scroll_up(max(1, self._rows - 1)); return
         if e.key() == _Qt.Key.Key_PageDown:
-            self._scroll(-3); return
+            self._scroll_down(max(1, self._rows - 1)); return
 
         data = key_event_to_bytes(e.key(), e.modifiers(), e.text(),
                                   self._codec, self._enter_mode)
@@ -492,10 +598,7 @@ class QTerminalWidget(QWidget):
             self.sendRequested.emit(data)
             if self._local_echo:
                 self._echo_local(e, data)
-        # 输入时回到底部
-        if self._view_offset and data:
-            self._view_offset = 0
-            self.update()
+            self._jump_bottom()
 
     def _echo_local(self, e, data):
         from PyQt6.QtCore import Qt as _Qt
@@ -508,21 +611,15 @@ class QTerminalWidget(QWidget):
             self._stream.feed(e.text())
         self.update()
 
-    def _scroll(self, delta):
-        max_off = max(0, self._total_lines() - self._rows)
-        self._view_offset = max(0, min(max_off, self._view_offset + delta))
-        self.update()
-
     def wheelEvent(self, e):
-        step = 3
         d = e.angleDelta().y()
         if d > 0:
-            self._scroll(step)
+            self._scroll_up(3)
         elif d < 0:
-            self._scroll(-step)
+            self._scroll_down(3)
 
     def _toggle_blink(self):
-        if self._view_offset == 0 and self.hasFocus():
+        if self._stick and self.hasFocus():
             self._blink_on = not self._blink_on
             self.update()
 

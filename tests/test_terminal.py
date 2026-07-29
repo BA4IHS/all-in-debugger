@@ -131,6 +131,64 @@ def test_selection_text(qapp):
     assert w.selected_text() == "ABC"
 
 
+def _make_term(qapp):
+    from app.ui.terminal_widget import QTerminalWidget
+    w = QTerminalWidget()
+    w.resize(400, 240)
+    w._refit()
+    return w
+
+
+def _fill(w, n):
+    w.feed_bytes(("\n".join(f"L{i:03d}" for i in range(n)) + "\n").encode())
+
+
+def test_stick_follows_then_holds(qapp):
+    w = _make_term(qapp)
+    _fill(w, w._rows + 30)
+    assert w._stick is True
+    assert w._top_line == w._max_top() and w._max_top() > 0
+    w._scroll_up(5)
+    assert w._stick is False
+    held = w._top_line
+    w.feed_bytes(b"X\n")              # 上翻时新数据不得拽走视图
+    assert w._top_line == held
+    w._scroll_down(99999)
+    assert w._stick is True
+
+
+def test_vbar_sync_and_jump(qapp):
+    w = _make_term(qapp)
+    _fill(w, w._rows + 20)
+    w._scroll_up(4)
+    assert w._vbar.value() == w._top_line
+    w._on_vbar(0)                     # 模拟用户拖滚动条到顶
+    assert w._top_line == 0 and w._stick is False
+    w._jump_bottom()
+    assert w._stick is True and w._top_line == w._max_top()
+
+
+def test_drag_scroll_extends_selection(qapp):
+    w = _make_term(qapp)
+    _fill(w, w._rows + 20)
+    w._jump_bottom()
+    w._sel_anchor = (w._first_abs() + 2, 0)
+    w._sel_current = (w._first_abs() + 2, 5)
+    w._drag_dir = -1
+    before = w._first_abs()
+    w._drag_scroll_step()
+    assert w._first_abs() == before - 1
+    assert w._sel_current == (w._first_abs(), 0)
+
+
+def test_left_scrollbar_layout_and_gutter(qapp):
+    w = _make_term(qapp)
+    assert w._vbar.width() == w._gx
+    assert w._vbar.geometry().height() == w.height()
+    # 落在左侧滚动条槽内的点击，列应夹紧到 0
+    assert w._cell_at(QPointF(2, 20))[1] == 0
+
+
 def test_mouse_selection_copy_no_float_crash(qapp):
     """鼠标坐标经 _cell_at 必须为 int，否则 selected_text 的 range() 崩溃。"""
     from app.ui.terminal_widget import QTerminalWidget
