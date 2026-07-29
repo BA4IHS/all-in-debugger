@@ -1,0 +1,41 @@
+# Byte-compiled / optimized
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
+.Python
+
+# Testing / tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Editor / IDE
+.vscode/
+.idea/
+.vs/
+*.swp
+*.swo
+
+# Runtime / user-generated data
+config.json
+data.json
+logs/
+adb_report_*.txt
+
+# Local diagnostics / screenshots (temp, underscore-prefixed)
+_*.png
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store

@@ -1,0 +1,537 @@
+# coding: utf-8
+"""交互式串口终端：pyte(VT100/ANSI 仿真) + Qt 自绘字符网格 + 键盘直发。
+
+设计要点（均经实测确定，非猜测）：
+- pyte.Char 字段：data/fg/bg/bold/italics/underscore/strikethrough/reverse/blink
+- 颜色名：标准色用英文名，且 33='brown'(=黄)；亮色(90-97/100-107)是独立名字
+  bright*；pyte0.8.2 背景亮洋红拼写为 'bfightmagenta'(库 bug)，需一并映射。
+  256/24bit 颜色为 6 位 hex 串。
+- buffer[row][col] 稀疏，用 .get(col, default_char)。
+- 宽字符占两列，右列 data='' 作占位；渲染时跳过占位、左列画两格宽。
+- 回滚不用 pyte.HistoryScreen（其 history 行切分异常），改为自维护 scrollback：
+  重写 index()，在顶行滚出时快照该行入 deque。
+"""
+import collections
+
+import pyte
+from wcwidth import wcwidth as _wcw
+
+from PyQt6.QtCore import QPointF, QRect, Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import (
+    QColor, QFont, QFontMetrics, QKeyEvent, QPainter, QPainterPath, QPen,
+    QMouseEvent,
+)
+from PyQt6.QtWidgets import QApplication, QMenu, QWidget
+
+from qfluentwidgets import isDarkTheme
+
+from app.serial_utils import decode_chunk, make_decoder
+
+# 终端面板内边距与圆角（描边画框，文本区向内缩进避免压到圆角）
+_PAD = 8
+_RADIUS = 8
+
+# ---------------------------------------------------------------------------
+# 调色板（VSCode 风格 16 色 + pyte typo 兼容）
+# ---------------------------------------------------------------------------
+
+PALETTE = {
+    "black": (0, 0, 0), "red": (205, 49, 49), "green": (13, 188, 121),
+    "brown": (228, 192, 53), "blue": (36, 114, 200), "magenta": (188, 63, 188),
+    "cyan": (17, 165, 183), "white": (229, 229, 229),
+    "brightblack": (102, 102, 102), "brightred": (241, 76, 76),
+    "brightgreen": (35, 209, 139), "brightbrown": (245, 245, 67),
+    "brightblue": (59, 142, 234), "brightmagenta": (214, 112, 214),
+    "brightcyan": (41, 184, 219), "brightwhite": (255, 255, 255),
+    "bfightmagenta": (214, 112, 214),  # pyte 0.8.2 背景亮洋红拼写 bug
+}
+_BOLD2BRIGHT = {
+    "black": "brightblack", "red": "brightred", "green": "brightgreen",
+    "brown": "brightbrown", "blue": "brightblue", "magenta": "brightmagenta",
+    "cyan": "brightcyan", "white": "brightwhite",
+}
+DEFAULT_FG = (212, 212, 212)
+DEFAULT_BG = (30, 30, 30)
+CURSOR_COLOR = (220, 220, 220)
+SELECTION_BG = (38, 79, 120)
+
+
+def resolve_color(name, is_bg: bool):
+    if name == "default" or not name:
+        return DEFAULT_BG if is_bg else DEFAULT_FG
+    if name in PALETTE:
+        return PALETTE[name]
+    if isinstance(name, str) and len(name) == 6:
+        try:
+            return (int(name[0:2], 16), int(name[2:4], 16), int(name[4:6], 16))
+        except ValueError:
+            pass
+    return DEFAULT_BG if is_bg else DEFAULT_FG
+
+
+# ---------------------------------------------------------------------------
+# 键盘映射
+# ---------------------------------------------------------------------------
+
+# Qt Key 常量延迟取（避免顶部导入 QtWidgets 之外的依赖问题）
+def _k(name):
+    from PyQt6.QtCore import Qt as _Qt
+    return getattr(_Qt.Key, "Key_" + name)
+
+
+_FUNCTION_KEYS = {
+    "F1": b"\x1bOP", "F2": b"\x1bOQ", "F3": b"\x1bOR", "F4": b"\x1bOS",
+    "F5": b"\x1b[15~", "F6": b"\x1b[17~", "F7": b"\x1b[18~", "F8": b"\x1b[19~",
+    "F9": b"\x1b[20~", "F10": b"\x1b[21~", "F11": b"\x1b[23~", "F12": b"\x1b[24~",
+}
+
+
+def key_event_to_bytes(key: int, modifiers, text: str, codec: str,
+                       enter_mode: str) -> bytes:
+    """把 QKeyEvent 信息映射为发往串口的字节；不需要发送时返回 b''。
+
+    纯函数，便于单测（不依赖 QWidget）。
+    """
+    from PyQt6.QtCore import Qt as _Qt
+    ctrl = bool(modifiers & _Qt.KeyboardModifier.ControlModifier)
+    shift = bool(modifiers & _Qt.KeyboardModifier.ShiftModifier)
+    alt = bool(modifiers & _Qt.KeyboardModifier.AltModifier)
+
+    # Ctrl+字母 -> 控制字符
+    if ctrl and not alt and _Qt.Key.Key_A <= key <= _Qt.Key.Key_Z:
+        return bytes([key - _Qt.Key.Key_A + 1])
+    if ctrl and not alt:
+        if key == _Qt.Key.Key_BracketLeft:
+            return b"\x1b"
+        if key == _Qt.Key.Key_Backslash:
+            return b"\x1c"
+        if key == _Qt.Key.Key_BracketRight:
+            return b"\x1d"
+
+    # 回车 / 退格 / Tab / Esc
+    if key in (_Qt.Key.Key_Return, _Qt.Key.Key_Enter):
+        return enter_mode.encode("latin-1", "replace")
+    if key == _Qt.Key.Key_Backspace:
+        return b"\x7f"
+    if key == _Qt.Key.Key_Tab:
+        return b"\t"
+    if key == _Qt.Key.Key_Escape:
+        return b"\x1b"
+
+    # 方向 / 编辑键
+    nav = {
+        _Qt.Key.Key_Up: b"\x1b[A", _Qt.Key.Key_Down: b"\x1b[B",
+        _Qt.Key.Key_Right: b"\x1b[C", _Qt.Key.Key_Left: b"\x1b[D",
+        _Qt.Key.Key_Home: b"\x1b[H", _Qt.Key.Key_End: b"\x1b[F",
+        _Qt.Key.Key_Insert: b"\x1b[2~", _Qt.Key.Key_Delete: b"\x1b[3~",
+    }
+    if key in nav:
+        return nav[key]
+
+    # 功能键
+    for name, seq in _FUNCTION_KEYS.items():
+        if key == getattr(_Qt.Key, "Key_" + name):
+            return seq
+
+    # 可打印字符（不含纯修饰键）
+    if text and not (ctrl or alt):
+        # 过滤掉仅修饰键产生的空/控制 text
+        if text.isprintable():
+            return text.encode(codec, "replace")
+    return b""
+
+
+# ---------------------------------------------------------------------------
+# pyte 屏幕子类：自维护回滚
+# ---------------------------------------------------------------------------
+
+class TermScreen(pyte.Screen):
+
+    def __init__(self, columns, lines, scrollback=2000):
+        super().__init__(columns, lines)
+        self.scrollback = collections.deque(maxlen=scrollback)
+
+    def _snapshot(self, row):
+        line = self.buffer.get(row, {})
+        return [line.get(c, self.default_char) for c in range(self.columns)]
+
+    def index(self):
+        top = self.margins[0] if self.margins else 0
+        bottom = self.margins[1] if self.margins else self.lines - 1
+        if self.cursor.y >= bottom:
+            self.scrollback.append(self._snapshot(top))
+        super().index()
+
+    def reset_scrollback(self):
+        self.scrollback.clear()
+
+
+# ---------------------------------------------------------------------------
+# 终端控件
+# ---------------------------------------------------------------------------
+
+class QTerminalWidget(QWidget):
+    """键盘输入 -> sendRequested(bytes)；外部调 feed_bytes() 喂入接收数据。"""
+
+    sendRequested = pyqtSignal(bytes)
+
+    def __init__(self, parent=None, scrollback=2000):
+        super().__init__(parent)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self._codec = "UTF-8"
+        self._decoder = make_decoder(self._codec)
+        self._enter_mode = "\r"
+        self._local_echo = False
+
+        self._cols = 80
+        self._rows = 24
+        self._screen = TermScreen(self._cols, self._rows, scrollback)
+        self._stream = pyte.Stream(self._screen)
+
+        self._font = QFont("Consolas", 11)
+        self._font.setStyleStrategy(QFont.StyleStrategy.PreferNoAntialias
+                                    if False else QFont.StyleStrategy.PreferAntialias)
+        self._recalc_metrics()
+
+        self._view_offset = 0          # 0=实时；>0=向上回滚的行数
+        self._blink_on = True
+        self._blink = QTimer(self)
+        self._blink.setInterval(530)
+        self._blink.timeout.connect(self._toggle_blink)
+        self._blink.start()
+
+        # 选择 (abs_row, col)
+        self._sel_anchor = None
+        self._sel_current = None
+
+        self.setMouseTracking(False)
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._context_menu)
+
+    # ── 对外 API ────────────────────────────────────────────────
+
+    def feed_bytes(self, data: bytes):
+        text = decode_chunk(self._decoder, data)
+        if text:
+            self._stream.feed(text)
+        self.update()
+
+    def set_codec(self, codec: str):
+        if codec != self._codec:
+            self._codec = codec
+            self._decoder = make_decoder(codec)
+
+    def set_enter_mode(self, mode: str):
+        self._enter_mode = mode
+
+    def set_local_echo(self, on: bool):
+        self._local_echo = bool(on)
+
+    def clear(self):
+        self._screen.reset()
+        self._screen.reset_scrollback()
+        self._view_offset = 0
+        self._sel_anchor = self._sel_current = None
+        self.update()
+
+    def set_font_size(self, pt: int):
+        self._font = QFont("Consolas", max(6, int(pt)))
+        self._recalc_metrics()
+        self._refit()
+
+    # ── 度量 / 行模型 ───────────────────────────────────────────
+
+    def _recalc_metrics(self):
+        fm = QFontMetrics(self._font)
+        self._cell_w = max(1, fm.horizontalAdvance("M"))
+        self._cell_h = max(1, fm.height())
+        self._ascent = fm.ascent()
+
+    def _refit(self):
+        area_w = max(1, self.width() - 2 * _PAD)
+        area_h = max(1, self.height() - 2 * _PAD)
+        cols = max(2, area_w // self._cell_w)
+        rows = max(2, area_h // self._cell_h)
+        if cols != self._cols or rows != self._rows:
+            self._cols, self._rows = cols, rows
+            self._screen.resize(rows, cols)
+            self._view_offset = 0
+            self.update()
+
+    def _total_lines(self):
+        return len(self._screen.scrollback) + self._screen.lines
+
+    def _first_abs(self):
+        return max(0, self._total_lines() - self._rows - self._view_offset)
+
+    def _doc_line(self, abs_row):
+        sb = self._screen.scrollback
+        if abs_row < len(sb):
+            row = sb[abs_row]
+        else:
+            r = abs_row - len(sb)
+            line = self._screen.buffer.get(r, {})
+            return [line.get(c, self._screen.default_char)
+                    for c in range(self._cols)]
+        # 回滚快照的列宽可能等于"捕获时"的列宽，与窗口缩放后的当前列宽不同，
+        # 必须规整到 self._cols，否则绘制/选择按当前列宽遍历会越界。
+        n = self._cols
+        if len(row) == n:
+            return row
+        if len(row) > n:
+            return row[:n]
+        return row + [self._screen.default_char] * (n - len(row))
+
+    # ── 绘制 ────────────────────────────────────────────────────
+
+    def paintEvent(self, _event):
+        painter = QPainter(self)
+        try:
+            self._draw(painter)
+        finally:
+            painter.end()
+
+    def _draw(self, painter: QPainter):
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w, h = self.width(), self.height()
+        W, H = self._cell_w, self._cell_h
+        ox, oy = _PAD, _PAD
+
+        # 圆角深色面板（终端始终深色，做成带描边的画框面板）
+        path = QPainterPath()
+        path.addRoundedRect(0.5, 0.5, max(0.0, w - 1), max(0.0, h - 1),
+                            _RADIUS, _RADIUS)
+        painter.fillPath(path, QColor(*DEFAULT_BG))
+
+        painter.save()
+        painter.setClipPath(path)
+        painter.setFont(self._font)
+
+        first = self._first_abs()
+        sel = self._sel_rect()
+
+        for r in range(self._rows):
+            line = self._doc_line(first + r)
+            y = oy + r * H
+            c = 0
+            while c < self._cols:
+                ch = line[c]
+                data = ch.data
+                if data == "":            # 宽字符右半占位
+                    c += 1
+                    continue
+                cw = _wcw(data) if data else 1
+                ww = 2 if (cw or 1) >= 2 else 1
+
+                fg_name, bg_name, bold, reverse = ch.fg, ch.bg, ch.bold, ch.reverse
+                if reverse:
+                    fg_name, bg_name = bg_name, fg_name
+                if bold and fg_name in _BOLD2BRIGHT:
+                    fg_name = _BOLD2BRIGHT[fg_name]
+
+                bg = resolve_color(bg_name, True)
+                in_sel = sel is not None and self._in_sel(first + r, c, sel)
+                if in_sel:
+                    painter.fillRect(ox + c * W, y, ww * W, H, QColor(*SELECTION_BG))
+                elif bg != DEFAULT_BG:
+                    painter.fillRect(ox + c * W, y, ww * W, H, QColor(*bg))
+
+                if data and data != " " and (cw or 0) >= 1:
+                    painter.setPen(QPen(QColor(*resolve_color(fg_name, False))))
+                    painter.drawText(QPointF(ox + c * W, y + self._ascent), data)
+                c += ww
+
+        # 光标（仅实时视图且可见）
+        if self._view_offset == 0 and self._blink_on and self.hasFocus():
+            cx, cy = self._screen.cursor.x, self._screen.cursor.y
+            if 0 <= cy < self._rows:
+                cr = QRect(ox + cx * W, oy + cy * H, W, H)
+                painter.fillRect(cr, QColor(*CURSOR_COLOR))
+                ch = self._screen.buffer.get(cy, {}).get(
+                    cx, self._screen.default_char)
+                if ch.data and ch.data != " ":
+                    painter.setPen(QPen(QColor(*DEFAULT_BG)))
+                    painter.drawText(QPointF(ox + cx * W, oy + cy * H + self._ascent),
+                                     ch.data)
+        painter.restore()
+
+        # 描边（主题自适应：浅主题深边、深主题浅边）
+        border = QColor(0, 0, 0, 120) if not isDarkTheme() else QColor(255, 255, 255, 90)
+        painter.setPen(QPen(border, 1))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawPath(path)
+
+    # ── 选择 ────────────────────────────────────────────────────
+
+    def _sel_rect(self):
+        if self._sel_anchor is None or self._sel_current is None:
+            return None
+        (r0, c0), (r1, c1) = self._sel_anchor, self._sel_current
+        if (r0, c0) > (r1, c1):
+            (r0, c0), (r1, c1) = (r1, c1), (r0, c0)
+        return (r0, c0, r1, c1)
+
+    def _in_sel(self, abs_row, col, rect):
+        r0, c0, r1, c1 = rect
+        if abs_row < r0 or abs_row > r1:
+            return False
+        if r0 == r1:
+            return c0 <= col <= c1
+        if abs_row == r0:
+            return col >= c0
+        if abs_row == r1:
+            return col <= c1
+        return True
+
+    def _cell_at(self, pos):
+        # 坐标为 QPointF，// 在 Python 下得 float，必须 int()，否则 selected_text 的 range() 崩溃
+        col = int((pos.x() - _PAD) // self._cell_w)
+        row = int((pos.y() - _PAD) // self._cell_h)
+        col = min(self._cols - 1, max(0, col))
+        row = min(self._rows - 1, max(0, row))
+        return (self._first_abs() + row, col)
+
+    def all_text(self) -> str:
+        """导出全部文档（回滚历史 + 当前屏）为纯文本，用于保存报告。"""
+        total = self._total_lines()
+        out = []
+        for r in range(total):
+            line = self._doc_line(r)
+            chars = []
+            c = 0
+            while c < self._cols:
+                d = line[c].data
+                if d != "":
+                    chars.append(d)
+                c += 1
+            out.append("".join(chars).rstrip())
+        return "\n".join(out)
+
+    def selected_text(self) -> str:
+        rect = self._sel_rect()
+        if rect is None:
+            return ""
+        r0, c0, r1, c1 = rect
+        out = []
+        for r in range(r0, r1 + 1):
+            line = self._doc_line(r)
+            cs = c0 if r == r0 else 0
+            ce = c1 if r == r1 else self._cols - 1
+            chars = []
+            c = cs
+            while c <= ce and c < self._cols:
+                d = line[c].data
+                if d != "":
+                    chars.append(d)
+                c += 1
+            out.append("".join(chars).rstrip())
+        return "\n".join(out)
+
+    def mousePressEvent(self, e: QMouseEvent):
+        if e.button() == Qt.MouseButton.LeftButton:
+            self._sel_anchor = self._sel_current = self._cell_at(e.position())
+            self.update()
+        super().mousePressEvent(e)
+
+    def mouseMoveEvent(self, e: QMouseEvent):
+        if self._sel_anchor is not None and e.buttons() & Qt.MouseButton.LeftButton:
+            self._sel_current = self._cell_at(e.position())
+            self.update()
+        super().mouseMoveEvent(e)
+
+    def mouseReleaseEvent(self, e: QMouseEvent):
+        if e.button() == Qt.MouseButton.LeftButton and self._sel_anchor is not None:
+            self._sel_current = self._cell_at(e.position())
+            self.update()
+        super().mouseReleaseEvent(e)
+
+    def _context_menu(self, pos):
+        m = QMenu(self)
+        copy_act = m.addAction("复制")
+        paste_act = m.addAction("粘贴")
+        clear_act = m.addAction("清屏")
+        act = m.exec(self.mapToGlobal(pos))
+        if act == copy_act:
+            self._copy()
+        elif act == paste_act:
+            self._paste()
+        elif act == clear_act:
+            self.clear()
+
+    def _copy(self):
+        text = self.selected_text()
+        if text:
+            QApplication.clipboard().setText(text)
+
+    def _paste(self):
+        text = QApplication.clipboard().text()
+        if text:
+            self.sendRequested.emit(text.encode(self._codec, "replace"))
+
+    # ── 键盘 ────────────────────────────────────────────────────
+
+    def keyPressEvent(self, e: QKeyEvent):
+        from PyQt6.QtCore import Qt as _Qt
+        # 复制 / 粘贴快捷键
+        if e.modifiers() & _Qt.KeyboardModifier.ControlModifier and \
+                e.modifiers() & _Qt.KeyboardModifier.ShiftModifier:
+            if e.key() == _Qt.Key.Key_C:
+                self._copy(); return
+            if e.key() == _Qt.Key.Key_V:
+                self._paste(); return
+
+        # 翻页
+        if e.key() == _Qt.Key.Key_PageUp:
+            self._scroll(3); return
+        if e.key() == _Qt.Key.Key_PageDown:
+            self._scroll(-3); return
+
+        data = key_event_to_bytes(e.key(), e.modifiers(), e.text(),
+                                  self._codec, self._enter_mode)
+        if data:
+            self.sendRequested.emit(data)
+            if self._local_echo:
+                self._echo_local(e, data)
+        # 输入时回到底部
+        if self._view_offset and data:
+            self._view_offset = 0
+            self.update()
+
+    def _echo_local(self, e, data):
+        from PyQt6.QtCore import Qt as _Qt
+        if e.key() in (_Qt.Key.Key_Return, _Qt.Key.Key_Enter):
+            self._stream.feed("\r\n")
+        elif e.key() == _Qt.Key.Key_Backspace:
+            self._stream.feed("\b \b")
+        elif e.text() and e.text().isprintable() and not (
+                e.modifiers() & _Qt.KeyboardModifier.ControlModifier):
+            self._stream.feed(e.text())
+        self.update()
+
+    def _scroll(self, delta):
+        max_off = max(0, self._total_lines() - self._rows)
+        self._view_offset = max(0, min(max_off, self._view_offset + delta))
+        self.update()
+
+    def wheelEvent(self, e):
+        step = 3
+        d = e.angleDelta().y()
+        if d > 0:
+            self._scroll(step)
+        elif d < 0:
+            self._scroll(-step)
+
+    def _toggle_blink(self):
+        if self._view_offset == 0 and self.hasFocus():
+            self._blink_on = not self._blink_on
+            self.update()
+
+    # ── 尺寸 ────────────────────────────────────────────────────
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._refit()
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        self._refit()

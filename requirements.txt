@@ -1,0 +1,4 @@
+PyQt6>=6.5
+qfluentwidgets==1.11.2
+pyserial>=3.5
+pyte>=0.8.2
