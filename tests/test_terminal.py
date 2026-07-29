@@ -7,9 +7,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtCore import QPointF
-from PyQt6.QtGui import QImage, QPainter
+from PyQt6.QtCore import QPoint, QPointF, Qt
+from PyQt6.QtGui import QImage, QPainter, QWheelEvent
 
 
 @pytest.fixture(scope="session")
@@ -122,6 +121,53 @@ def test_feed_and_draw_no_crash(qapp):
     p.end()
 
 
+def test_queued_terminal_feed_is_split_across_event_turns(qapp):
+    from app.ui.terminal_widget import QTerminalWidget, _QUEUED_FEED_CHUNK
+
+    w = QTerminalWidget()
+    payload = b"A" * (_QUEUED_FEED_CHUNK * 3)
+    w.queue_bytes(payload)
+    assert w.queued_byte_count() == len(payload)
+
+    # 单次定时回调只解析一个小块，其余内容留给后续事件循环，
+    # 因而键盘和窗口事件可以穿插执行。
+    w._feed_timer.stop()
+    w._drain_feed_queue()
+    w._feed_timer.stop()
+    assert w.queued_byte_count() == len(payload) - _QUEUED_FEED_CHUNK
+    assert w._screen.buffer[0][0].data == "A"
+    w.discard_queued_bytes()
+    assert w.queued_byte_count() == 0
+
+
+def test_queued_terminal_feed_keeps_keyboard_responsive(qapp):
+    import time
+    from PyQt6.QtCore import QEvent, QTimer
+    from PyQt6.QtGui import QKeyEvent
+    from PyQt6.QtWidgets import QApplication
+    from app.ui.terminal_widget import QTerminalWidget
+
+    w = QTerminalWidget()
+    sent = []
+    w.sendRequested.connect(
+        lambda data: sent.append((bytes(data), w.queued_byte_count())))
+    w.queue_bytes(b"X" * (512 * 1024))
+    QTimer.singleShot(
+        20,
+        lambda: QApplication.sendEvent(
+            w, QKeyEvent(
+                QEvent.Type.KeyPress, Qt.Key.Key_A,
+                Qt.KeyboardModifier.NoModifier, "a")))
+
+    end = time.time() + 2
+    while time.time() < end and not sent:
+        qapp.processEvents()
+
+    assert sent and sent[0][0] == b"a"
+    assert sent[0][1] > 0, "键盘直到全部输出处理完后才响应"
+    w.discard_queued_bytes()
+
+
 def test_selection_text(qapp):
     from app.ui.terminal_widget import QTerminalWidget
     w = QTerminalWidget()
@@ -181,12 +227,102 @@ def test_drag_scroll_extends_selection(qapp):
     assert w._sel_current == (w._first_abs(), 0)
 
 
-def test_left_scrollbar_layout_and_gutter(qapp):
+def test_find_matches_and_count(qapp):
     w = _make_term(qapp)
+    w.feed_bytes(b"hello world\r\nfoo hello bar\r\n")
+    w._on_find_text("hello")
+    assert w._matches == [(0, 0, 4), (1, 4, 8)]
+    assert w._cur == 0
+    assert w._row_marks(0)[0] == 2 and w._row_marks(0)[4] == 2 and w._row_marks(0)[5] == 0
+    assert w._row_marks(1)[4] == 1     # 非当前匹配
+
+
+def test_find_case_sensitive(qapp):
+    w = _make_term(qapp)
+    w.feed_bytes(b"Hello hello\r\n")
+    w._on_find_text("Hello")
+    assert len(w._matches) == 2
+    w._on_find_case(True)
+    assert len(w._matches) == 1 and w._matches[0] == (0, 0, 4)
+
+
+def test_find_wide_char_columns(qapp):
+    w = _make_term(qapp)
+    w.feed_bytes("中abc中文".encode("utf-8"))
+    w._on_find_text("中文")
+    assert w._matches == [(0, 5, 8)]
+
+
+def test_find_next_prev_wrap(qapp):
+    w = _make_term(qapp)
+    w.feed_bytes(b"x\nx\nx\n")
+    w._on_find_text("x")
+    assert w._cur == 0
+    w._find_next(); w._find_next(); w._find_next()   # 0->1->2->0
+    assert w._cur == 0
+    w._find_prev()                                    # 0->2
+    assert w._cur == 2
+
+
+def test_find_scrolls_to_match(qapp):
+    w = _make_term(qapp)
+    w.feed_bytes(("FIRST\n" + "\n".join(f"L{i}" for i in range(60)) + "\n").encode())
+    w._jump_bottom()
+    assert w._top_line > 0
+    w._on_find_text("FIRST")
+    assert w._top_line == 0 and w._stick is False
+
+
+def test_find_open_close(qapp):
+    w = _make_term(qapp)
+    w._open_find()
+    assert not w._find.isHidden()
+    w._close_find()
+    assert w._find.isHidden() and w._matches == []
+
+
+def test_right_scrollbar_layout_and_gutter(qapp):
+    w = _make_term(qapp)
+    assert w._gx == 12
     assert w._vbar.width() == w._gx
     assert w._vbar.geometry().height() == w.height()
-    # 落在左侧滚动条槽内的点击，列应夹紧到 0
+    assert w._vbar.geometry().left() == w.width() - w._gx
+    # 文本从左侧内边距开始；落在右侧滚动条槽内时应夹紧到最后一列。
     assert w._cell_at(QPointF(2, 20))[1] == 0
+    assert w._cell_at(QPointF(w.width() - 2, 20))[1] == w._cols - 1
+
+
+def test_all_scrollbars_use_translucent_white_style(qapp):
+    from PyQt6.QtWidgets import QScrollBar
+    from qfluentwidgets import ScrollArea
+    from app.ui.scrollbar_style import (
+        NATIVE_SCROLLBAR_QSS, apply_white_scrollbars,
+        install_white_scrollbars,
+    )
+
+    install_white_scrollbars(qapp)
+    assert NATIVE_SCROLLBAR_QSS.strip() in qapp.styleSheet()
+
+    native = QScrollBar(Qt.Orientation.Vertical)
+    assert "rgba(255, 255, 255, 145)" in native.styleSheet() \
+        or "rgba(255, 255, 255, 145)" in qapp.styleSheet()
+
+    area = ScrollArea()
+    apply_white_scrollbars(area)
+    delegate = area.scrollDelagate
+    for bar in (delegate.vScrollBar, delegate.hScrollBar):
+        assert bar.handle.lightColor.alpha() == 145
+        assert bar.handle.darkColor.alpha() == 145
+        assert bar.handle.lightColor.red() == 255
+        assert bar.handle.darkColor.red() == 255
+
+
+def test_find_bar_does_not_cover_right_scrollbar(qapp):
+    w = _make_term(qapp)
+    w.resize(800, 240)
+    w._refit()
+    w._open_find()
+    assert w._find.geometry().right() < w._vbar.geometry().left()
 
 
 def test_mouse_selection_copy_no_float_crash(qapp):
@@ -194,12 +330,159 @@ def test_mouse_selection_copy_no_float_crash(qapp):
     from app.ui.terminal_widget import QTerminalWidget
     w = QTerminalWidget()
     w.feed_bytes(b"HELLO WORLD")
-    w._sel_anchor = w._cell_at(QPointF(12.7, 9.3))
-    w._sel_current = w._cell_at(QPointF(80.1, 9.3))
+    ox = 8
+    w._sel_anchor = w._cell_at(QPointF(ox + 0.2, 9.3))
+    w._sel_current = w._cell_at(QPointF(ox + 4.8 * w._cell_w, 9.3))
     assert all(isinstance(v, int) for v in w._sel_anchor)
     assert all(isinstance(v, int) for v in w._sel_current)
     # 复制路径不得抛 TypeError
     assert "HELLO" in w.selected_text()
+
+
+def test_log_find_matches_navigation_and_close(qapp):
+    from app.ui.searchable_text_edit import SearchablePlainTextEdit
+    w = SearchablePlainTextEdit()
+    w.setPlainText("Hello hello\nhello")
+    w._on_find_text("hello")
+    assert len(w._matches) == 3 and w._current == 0
+    w._find_prev()
+    assert w._current == 2
+    w._on_find_case(True)
+    assert len(w._matches) == 2
+    w._close_find()
+    assert not w._matches and w.extraSelections() == []
+
+
+def test_log_find_recomputes_when_text_appends(qapp):
+    from app.ui.searchable_text_edit import SearchablePlainTextEdit
+    w = SearchablePlainTextEdit()
+    w.setPlainText("needle")
+    w._on_find_text("needle")
+    assert len(w._matches) == 1
+    w.appendPlainText("needle")
+    assert len(w._matches) == 2
+
+
+def test_log_wheel_scrolls_immediately_and_pauses_follow(qapp):
+    from PyQt6.QtWidgets import QApplication
+    from app.ui.receive_panel import ReceivePanel
+    from qfluentwidgets import SmoothMode
+
+    panel = ReceivePanel()
+    panel._ctrl._timer.stop()
+    panel._countTimer.stop()
+    panel.resize(500, 260)
+    panel.show()
+    try:
+        panel.view.setPlainText("\n".join(f"line {i}" for i in range(200)))
+        qapp.processEvents()
+
+        assert panel.view.scrollDelegate.verticalSmoothScroll.smoothMode \
+            == SmoothMode.NO_SMOOTH
+        sb = panel.view.verticalScrollBar()
+        sb.setValue(sb.maximum())
+        before = sb.value()
+        wheel_up = QWheelEvent(
+            QPointF(20, 20), QPointF(20, 20), QPoint(0, 0), QPoint(0, 120),
+            Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier,
+            Qt.ScrollPhase.NoScrollPhase, False)
+        QApplication.sendEvent(panel.view.viewport(), wheel_up)
+
+        assert sb.value() < before
+        assert panel._ctrl._autoScroll is False
+    finally:
+        panel.close()
+        panel.deleteLater()
+        qapp.processEvents()
+
+
+def test_connect_panel_infobar_uses_wide_anchor(qapp):
+    from PyQt6.QtWidgets import QWidget
+    from qfluentwidgets import InfoBar
+    from app.ui.connect_panel import ConnectPanel
+
+    panel = ConnectPanel()
+    anchor = QWidget()
+    panel.setInfoBarParent(anchor)
+    try:
+        panel.setOpenFailed("test error")
+        qapp.processEvents()
+        assert anchor.findChildren(InfoBar)
+        assert not panel.findChildren(
+            InfoBar, options=Qt.FindChildOption.FindDirectChildrenOnly)
+    finally:
+        anchor.close()
+        panel.close()
+        anchor.deleteLater()
+        panel.deleteLater()
+        qapp.processEvents()
+
+
+def test_log_disabled_follow_preserves_position_on_append(qapp):
+    from app.ui.receive_panel import ReceivePanel
+
+    panel = ReceivePanel()
+    panel._ctrl._timer.stop()
+    panel._countTimer.stop()
+    panel.resize(500, 260)
+    panel.show()
+    try:
+        panel.view.setPlainText("\n".join(f"line {i}" for i in range(200)))
+        qapp.processEvents()
+
+        panel.setAutoScroll(False)
+        sb = panel.view.verticalScrollBar()
+        sb.setValue(sb.maximum())
+        old_value, old_max = sb.value(), sb.maximum()
+        panel._ctrl.feed(b"new line", 0)
+        panel._ctrl._flush()
+
+        assert sb.maximum() > old_max
+        assert sb.value() == old_value
+        assert panel._ctrl._autoScroll is False
+    finally:
+        panel.close()
+        panel.deleteLater()
+        qapp.processEvents()
+
+
+def test_adb_navigation_icon_and_period_width(qapp):
+    from PyQt6.QtGui import QIcon
+    from qfluentwidgets import Theme
+    from app.ui.main_window import (
+        ANDROID_ICON, ANDROID_ICON_DARK_PATH, ANDROID_ICON_PATH,
+    )
+    from app.ui.send_panel import SendPanel
+
+    assert ANDROID_ICON_PATH.is_file()
+    assert ANDROID_ICON_DARK_PATH.is_file()
+    assert not QIcon(str(ANDROID_ICON_PATH)).isNull()
+    assert ANDROID_ICON.path(Theme.LIGHT) == str(ANDROID_ICON_PATH)
+    assert ANDROID_ICON.path(Theme.DARK) == str(ANDROID_ICON_DARK_PATH)
+
+    panel = SendPanel()
+    try:
+        assert panel.intervalSpin.width() == 180
+        panel.intervalSpin.setValue(86_400_000)
+        assert panel.intervalSpin.value() == 86_400_000
+    finally:
+        panel.stopPeriodic()
+        panel.close()
+        panel.deleteLater()
+        qapp.processEvents()
+
+
+def test_window_is_centered_in_available_screen(qapp):
+    from PyQt6.QtWidgets import QWidget
+    from app.ui.main_window import center_window
+
+    window = QWidget()
+    window.resize(400, 300)
+    screen = qapp.primaryScreen()
+    center_window(window, screen)
+    assert window.frameGeometry().center() == screen.availableGeometry().center()
+    window.deleteLater()
+    qapp.processEvents()
 
 
 def test_resize_with_scrollback_no_crash(qapp):

@@ -2,6 +2,7 @@
 """纯函数单测 + loop:// 回环下的 SerialWorker 端到端测试（无需硬件）。"""
 import sys
 import time
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
@@ -126,6 +127,22 @@ def test_format_port_label_plain():
 def test_format_port_label_empty_desc():
     assert su.format_port_label("COM3", "") == "COM3"
     assert su.format_port_label("COM3", "COM3") == "COM3"
+
+
+def test_list_serial_ports_filters_null_com_prefix(monkeypatch):
+    ports = [
+        SimpleNamespace(device="NULL_COM1", description="ELTIMA control"),
+        SimpleNamespace(device="null_com10", description="ELTIMA control"),
+        SimpleNamespace(device="NULL COM2", description="ELTIMA control"),
+        SimpleNamespace(device="COM3", description="USB Serial"),
+        SimpleNamespace(device="XNULL_COM4", description="Real device"),
+    ]
+    monkeypatch.setattr(su._list_ports, "comports", lambda: ports)
+
+    assert su.list_serial_ports() == [
+        ("COM3", "USB Serial"),
+        ("XNULL_COM4", "Real device"),
+    ]
 
 
 # ---------------------------------------------------------------------------
