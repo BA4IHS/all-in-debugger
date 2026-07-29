@@ -73,7 +73,8 @@ class SendPanel(QWidget):
         self.intervalSpin = SpinBox(self)
         self.intervalSpin.setRange(10, 86_400_000)
         self.intervalSpin.setValue(1000)
-        self.intervalSpin.setFixedWidth(120)
+        # 为最多 8 位毫秒值及右侧上下调节按钮预留完整空间。
+        self.intervalSpin.setFixedWidth(180)
         self.periodSwitch.checkedChanged.connect(self._onPeriodToggled)
         periodRow.addWidget(self.periodSwitch)
         periodRow.addWidget(self.intervalSpin)

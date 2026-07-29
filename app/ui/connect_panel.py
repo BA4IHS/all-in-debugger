@@ -40,6 +40,7 @@ class ConnectPanel(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._infoBarParent = None
         self._opened = False
         self._badge = None
         self._portDevices: list = []      # 有序真实端口名
@@ -234,7 +235,13 @@ class ConnectPanel(QWidget):
     def setOpenFailed(self, msg: str):
         self.setClosed()
         self._setBadge("error", "打开失败")
-        InfoBar.error(title="无法打开串口", content=msg, duration=5000, parent=self)
+        InfoBar.error(
+            title="无法打开串口", content=msg, duration=5000,
+            parent=self._infoBarParent or self)
+
+    def setInfoBarParent(self, parent: QWidget):
+        """指定提示条锚点，避免在窄连接面板内显示时溢出裁切。"""
+        self._infoBarParent = parent
 
     def setCounts(self, rx: int, tx: int):
         self.countLabel.setText(f"RX: {su.fmt_bytes(rx)}   TX: {su.fmt_bytes(tx)}")
@@ -251,7 +258,9 @@ class ConnectPanel(QWidget):
         port = self.currentPort()
         if not port:
             self._setBadge("error", "未选择端口")
-            InfoBar.warning(title="提示", content="请先选择端口", duration=3000, parent=self)
+            InfoBar.warning(
+                title="提示", content="请先选择端口", duration=3000,
+                parent=self._infoBarParent or self)
             return
         try:
             cfg = su.build_open_config(
@@ -266,7 +275,9 @@ class ConnectPanel(QWidget):
             )
         except ValueError as e:
             self._setBadge("error", "参数错误")
-            InfoBar.error(title="参数错误", content=str(e), duration=5000, parent=self)
+            InfoBar.error(
+                title="参数错误", content=str(e), duration=5000,
+                parent=self._infoBarParent or self)
             return
         self.openRequested.emit(cfg)
 

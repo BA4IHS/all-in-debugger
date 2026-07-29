@@ -29,6 +29,8 @@ class ConsolePage(QWidget):
         self.connectPanel = ConnectPanel()
         self.receivePanel = ReceivePanel()
         self.sendPanel = SendPanel()
+        # 左侧连接面板较窄，提示条统一显示在宽阔的接收区右上角。
+        self.connectPanel.setInfoBarParent(self.receivePanel)
 
         # ── 布局 ────────────────────────────────────────────────
         scroll = SingleDirectionScrollArea(self)
@@ -74,7 +76,7 @@ class ConsolePage(QWidget):
         w.openFailed.connect(cp.setOpenFailed)
         w.errorOccurred.connect(
             lambda msg: InfoBar.error(title="串口错误", content=msg,
-                                      duration=5000, parent=self))
+                                      duration=5000, parent=rp))
         rp.countsChanged.connect(cp.setCounts)
 
         # 连接面板 → worker / 接收区
@@ -124,14 +126,14 @@ class ConsolePage(QWidget):
             except OSError as e:
                 self.connectPanel.logSwitch.setChecked(False)
                 InfoBar.error(title="无法创建日志目录", content=str(e),
-                              duration=5000, parent=self)
+                              duration=5000, parent=self.receivePanel)
                 return
             ts = time.strftime("%Y%m%d_%H%M%S")
             path = str(Path(logDir) / f"serial_{port}_{ts}.bin")
             self.st.sigSetLogFile.emit(path)
             self._logActive = True
             InfoBar.success(title="开始记录", content=path,
-                            duration=3000, parent=self)
+                            duration=3000, parent=self.receivePanel)
         elif self._logActive:
             self.st.sigSetLogFile.emit("")
             self._logActive = False
