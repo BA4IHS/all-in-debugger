@@ -158,10 +158,20 @@ def fmt_bytes(n: int) -> str:
 # 端口枚举
 # ---------------------------------------------------------------------------
 
+def _is_null_com_port(device: str) -> bool:
+    """识别 ELTIMA 等虚拟串口工具生成的 NULL_COM* 控制端口。"""
+    normalized = (device or "").strip().upper().replace(" ", "_")
+    return normalized.startswith("NULL_COM")
+
+
 def list_serial_ports() -> List[Tuple[str, str]]:
-    """返回 [(端口名, 描述), ...]，按端口名排序。"""
+    """返回 [(端口名, 描述), ...]，过滤 NULL_COM* 后按端口名排序。"""
     try:
-        ports = sorted(_list_ports.comports(), key=lambda p: p.device)
+        ports = [
+            p for p in _list_ports.comports()
+            if not _is_null_com_port(p.device)
+        ]
+        ports.sort(key=lambda p: p.device)
     except Exception:
         return []
     return [(p.device, p.description or p.device) for p in ports]
