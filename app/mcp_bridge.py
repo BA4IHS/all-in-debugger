@@ -406,7 +406,8 @@ class WorkerBridge:
 
     def _run_adb(self, args, timeout: float) -> str:
         timeout = max(1.0, min(float(timeout), ADB_TIMEOUT_CAP))
-        kwargs = dict(capture_output=True, text=True, timeout=timeout)
+        kwargs = dict(capture_output=True, text=True, timeout=timeout,
+                      encoding="utf-8", errors="replace")
         if sys.platform == "win32":
             kwargs["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
         try:

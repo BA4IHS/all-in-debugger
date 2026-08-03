@@ -1,5 +1,6 @@
 # coding: utf-8
 """MCP 桥接层测试：跨线程查询/命令转发/超时/错误路径。"""
+import subprocess
 import threading
 import time
 
@@ -245,3 +246,32 @@ def test_concurrent_queries(bridge):
     assert not errors
     assert len(results) == 8
     assert all(r["opened"] is False for r in results)
+
+
+# ── adb subprocess 必须显式 UTF-8 解码（防 Windows GBK 崩溃）──────────
+
+def test_run_adb_uses_utf8_encoding():
+    """回归：MCP adb 工具曾困 Windows 默认 GBK 解码在 _readerthread 抛
+    UnicodeDecodeError；subprocess 必须带 encoding=utf-8 + errors=replace。"""
+    br = WorkerBridge(None, None, None, None)
+    captured = {}
+
+    class _R:
+        returncode = 0
+        stdout = "ok"
+        stderr = ""
+
+    def fake_run(cmd, **kwargs):
+        captured.update(kwargs)
+        return _R()
+
+    br._adb_path = lambda: "adb"
+    orig = subprocess.run
+    subprocess.run = fake_run
+    try:
+        assert br.adb_shell("SERIAL", "echo hi", timeout=2.0) == "ok"
+    finally:
+        subprocess.run = orig
+    assert captured.get("encoding") == "utf-8"
+    assert captured.get("errors") == "replace"
+    assert captured.get("text") is True

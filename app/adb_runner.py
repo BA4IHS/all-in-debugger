@@ -53,7 +53,8 @@ def find_adb(configured: str) -> Tuple[Optional[str], str]:
 def adb_version(adb_path: str) -> Tuple[Optional[str], str]:
     try:
         r = subprocess.run([adb_path, "version"], capture_output=True,
-                           text=True, timeout=6, creationflags=_hide_console())
+                           text=True, encoding="utf-8", errors="replace",
+                           timeout=6, creationflags=_hide_console())
     except Exception as e:
         return None, str(e)
     out = ((r.stdout or "") + "\n" + (r.stderr or "")).strip()
@@ -91,7 +92,8 @@ def list_adb_devices(adb_path: str) -> Tuple[List[dict], str]:
     """返回 ([{serial,state,info}, ...], 错误)。state 如 device/offline/unauthorized。"""
     try:
         r = subprocess.run([adb_path, "devices", "-l"], capture_output=True,
-                           text=True, timeout=6, creationflags=_hide_console())
+                           text=True, encoding="utf-8", errors="replace",
+                           timeout=6, creationflags=_hide_console())
     except Exception as e:
         return [], str(e)
     out = (r.stdout or "") + (r.stderr or "")

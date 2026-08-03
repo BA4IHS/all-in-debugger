@@ -109,9 +109,9 @@ class MainWindow(SplitFluentWindow):
             self.settingPage, FluentIcon.SETTING, "设置",
             position=NavigationItemPosition.BOTTOM)
 
-        # 设置里改默认型号 -> ADB 页同步重载（lambda 屏蔽信号参数）
+        # 设置里改默认型号 -> ADB 页立即重载并选中新型号（无需重启）
         self.settingPage.modelCard.modelChanged.connect(
-            lambda _stem: self.adbPage.reload_models())
+            lambda _stem: self.adbPage.reload_models(preselect_default=True))
 
         # 跨页接线
         self.presetPage.sendRequested.connect(self.st.sigWrite.emit)
