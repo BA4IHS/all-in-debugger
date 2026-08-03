@@ -1,6 +1,6 @@
-# 串口调试工具（QFluentWidgets）
+# All-in Debugger（QFluentWidgets）
 
-基于 PyQt6 + qfluentwidgets 1.11.2 + pyserial 的全功能串口调试工具，Fluent 风格，支持浅色/深色/跟随系统主题。
+基于 PyQt6 + qfluentwidgets 1.11.2 的全功能调试工具集：串口、ADB、HID、DAP-link RTT、Modbus、SSH，Fluent 风格，支持浅色/深色/跟随系统主题，并内嵌 MCP 服务供 AI 客户端调用。
 
 ## 功能
 
@@ -14,6 +14,14 @@
 - **终端模式**：调试页"终端模式"开关，切到交互式 VT100/ANSI 终端（pyte 仿真 + Qt 自绘网格），键盘直发串口，支持彩色/光标/清屏/滚屏、右侧回滚条、拖选越界自动滚动、鼠标框选复制、本地回显、回车符可选
 - **内容查找**：串口日志、串口终端和 ADB 终端均可按 `Ctrl+F` 或右键“查找”，支持匹配计数、循环跳转、大小写匹配与结果高亮
 - **ADB 文件管理**：独立可缩放窗口，支持设备目录浏览、复选/框选、上传文件或文件夹、批量下载与二次确认删除；全部 ADB 操作异步执行并显示进度
+- **HID 调试**：集成官方 `hidapi.dll`（已随程序交付于 `app/libs/`），设备枚举（VID/PID 过滤）、打开/关闭、HEX/文本发送（报告 ID 自动补 0x00）、周期发送、特征报告读/写、异步接收显示
+- **ADB 自带三件套**：`app/libs/adb/` 内置官方 platform-tools（adb.exe + AdbWinApi.dll + AdbWinUsbApi.dll），未配置且 PATH 找不到 adb 时自动使用；ADB 调试始终走 adb.exe 子进程
+- **DAP-link RTT**：经 `hidapi.dll` 直连调试器 USB HID（CMSIS-DAP 协议纯 Python 实现，不依赖厂商 DLL；Keil CMSIS_DAP.dll 为 32 位私有插件，无公开接口，故不采用），SWD 连接、IDCODE 读取、可选硬件复位、SEGGER RTT 控制块自动扫描/手动指定、多通道上行实时显示与下行发送
+- **Modbus 调试**：基于 `pymodbus`，支持 RTU（串口）与 TCP 客户端，FC01–FC06/FC15/FC16 读写；Modbus Poll 式网格数据表（每寄存器一格，固定 10 格一列，任意起始地址/数量），逐格数据类型（U16/I16/HEX/Float/ASCII，右键设置），周期轮询与帧日志
+- **SSH 调试**：基于 `paramiko`，交互式终端（复用 pyte 仿真，自动 resize_pty）、密码/私钥认证、会话保存（密码不落盘）、SFTP 目录浏览/下载/上传/删除
+- **MCP 服务**：内嵌 streamable HTTP MCP 服务（FastMCP + uvicorn，仅监听 127.0.0.1，Bearer Token 鉴权），向 AI 客户端暴露 37 个调试工具（串口/HID/DAP-RTT/Modbus/SSH 的状态、读写与文件操作），设置页可开关端口与复制接入配置
+
+> 原生依赖统一放 `app/libs/`（位数需与 Python 一致，支持 x86/x64 子目录与 `HIDAPI_DLL` 环境变量）；缺失时相应页面优雅降级并提示。
 
 ## 终端模式
 
@@ -62,8 +70,19 @@ com/
 │   ├── config.py           # qconfig 配置 + data.json（历史/预设）
 │   ├── serial_utils.py     # 纯函数：HEX/解码/换行/端口枚举
 │   ├── serial_worker.py    # SerialWorker（QThread 内阻塞读循环）
+│   ├── native.py           # 统一 DLL 加载器（app/libs/ 目录）
+│   ├── hid_binding.py      # hidapi.dll 绑定（HID 与 DAP 共用）
+│   ├── hid_worker.py       # HID 收发线程
+│   ├── dap_core.py         # CMSIS-DAP/SWD 协议（HID 直连）
+│   ├── dap_rtt.py          # SEGGER RTT 控制块扫描/通道读写
+│   ├── dap_worker.py       # DAP/RTT 轮询线程
+│   ├── modbus_core.py      # pymodbus 异步客户端封装 + Modbus 收发线程
+│   ├── ssh_worker.py       # paramiko SSH/SFTP 线程
+│   ├── mcp_bridge.py       # MCP 桥接（跨线程信号转发）
+│   ├── mcp_server.py       # 内嵌 MCP 服务（37 工具）
+│   ├── libs/               # hidapi.dll + adb 三件套（随程序交付）
 │   └── ui/
-│       ├── main_window.py  # SplitFluentWindow 三页面
+│       ├── main_window.py  # SplitFluentWindow 八页面
 │       ├── console_page.py # 主调试页（左配置 + 右收发）
 │       ├── connect_panel.py
 │       ├── receive_panel.py
@@ -72,8 +91,13 @@ com/
 │       ├── preset_page.py
 │       ├── adb_page.py
 │       ├── adb_file_manager.py
+│       ├── hid_page.py     # HID 调试页
+│       ├── dap_page.py     # DAP-link RTT 调试页
+│       ├── modbus_page.py  # Modbus 调试页（网格数据表）
+│       ├── ssh_page.py     # SSH 调试页（终端 + SFTP）
+│       ├── console_style.py # 日志/终端深色主题适配
 │       └── setting_page.py
-└── tests/test_serial_utils.py
+└── tests/                  # 纯函数单测 + worker 端到端测试
 ```
 
 ## 已知限制
