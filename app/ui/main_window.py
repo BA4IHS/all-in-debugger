@@ -48,7 +48,7 @@ class MainWindow(SplitFluentWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("串口调试工具")
+        self.setWindowTitle("all-in-debugger")
         self.resize(1220, 780)
 
         # 串口工作线程（唯一持有 serial.Serial）
