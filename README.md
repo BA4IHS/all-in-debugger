@@ -210,7 +210,7 @@ GitHub: [BA4IHS](https://github.com/BA4IHS)
 | pyserial / pyte / pymodbus | BSD | ✅ 兼容 |
 | paramiko | LGPL-2.1 | ✅ 兼容 |
 | mcp (Python SDK) | MIT | ✅ 兼容 |
-| hidapi.dll | GPLv3 / BSD-3 / 原始许可 三选一 | ✅ 按 BSD-3 使用 |
+| hidapi.dll | GPLv3 / BSD-3 / 原始许可 三选一 | ✅ 随本项目按 GPLv3 使用 |
 | adb 三件套 | Apache-2.0（Google 官方 platform-tools，子进程调用） | ✅ 兼容 |
 
 > 若您希望商业闭源分发，需同时向 Riverbank（PyQt6）与 qfluentwidgets 作者购买商业许可证。
