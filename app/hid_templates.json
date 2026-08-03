@@ -1,0 +1,16 @@
+[
+ {
+  "sel": true,
+  "name": "点灯",
+  "data": "AA BB CC DD",
+  "delay": 100,
+  "repeat": 1
+ },
+ {
+  "sel": false,
+  "name": "熄灭",
+  "data": "00 11 22",
+  "delay": 200,
+  "repeat": 3
+ }
+]

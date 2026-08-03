@@ -25,14 +25,28 @@ from PyQt6.QtCore import QObject, QProcess, QTimer, pyqtSignal
 # adb 定位 / 版本 / 设备列表（同步）
 # ---------------------------------------------------------------------------
 
+def _bundled_adb() -> Optional[str]:
+    """程序自带的 adb 三件套（app/libs/adb/，含官方 AdbWinApi/AdbWinUsbApi）。"""
+    from app.native import LIBS_DIR
+    cand = LIBS_DIR / "adb" / "adb.exe"
+    return str(cand) if cand.is_file() else None
+
+
 def find_adb(configured: str) -> Tuple[Optional[str], str]:
-    """解析 adb 可执行文件路径。返回 (path 或 None, 说明/错误)。"""
-    cand = (configured or "").strip() or "adb"
-    resolved = shutil.which(cand)
-    if not resolved and os.path.isabs(cand) and os.path.isfile(cand):
-        resolved = cand
+    """解析 adb 可执行文件路径。返回 (path 或 None, 说明/错误)。
+
+    优先级：配置项 > 程序自带三件套 > PATH。
+    （自带版为官方最新 platform-tools；PATH 里常有刷机工具捆绑的
+    1.0.39 旧客户端，交互终端会有数秒回显延迟，故排在自带版之后。）
+    """
+    cand = (configured or "").strip()
+    if cand and os.path.isabs(cand) and os.path.isfile(cand):
+        return cand, ""
+    resolved = _bundled_adb()
     if not resolved:
-        return None, f"未找到 adb：{cand}（请在设置里配置 adb 路径）"
+        resolved = shutil.which(cand or "adb")
+    if not resolved:
+        return None, f"未找到 adb：{cand or 'adb'}（请在设置里配置 adb 路径）"
     return resolved, ""
 
 
