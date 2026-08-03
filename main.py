@@ -1,5 +1,9 @@
 # coding: utf-8
-"""all-in-debugger 入口。"""
+"""all-in-debugger 入口。
+
+Copyright (C) 2026 BA4IHS / MXL8876
+本程序为自由软件，可按 GNU GPLv3 条款再分发和/或修改（详见 LICENSE）。
+"""
 import sys
 from pathlib import Path
 

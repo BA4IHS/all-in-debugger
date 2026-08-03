@@ -6,6 +6,7 @@
 
 [![Stargazers][stars-shield]][stars-url]
 [![Release][release-shield]][release-url]
+[![GPLv3][license-shield]][license-url]
 
 <!-- PROJECT LOGO -->
 <br />
@@ -45,6 +46,7 @@
 - [使用到的框架](#使用到的框架)
 - [贡献者](#贡献者)
 - [作者](#作者)
+- [版权说明](#版权说明)
 - [鸣谢](#鸣谢)
 
 ## 功能模块
@@ -174,6 +176,24 @@ GitHub: [BA4IHS](https://github.com/BA4IHS)
 
 *您也可以在贡献者名单中参看所有参与该项目的开发者。*
 
+## 版权说明
+
+本项目采用 **GNU GPLv3** 授权许可，详情请参阅 [LICENSE](LICENSE)。
+
+选择 GPLv3 的原因：核心依赖 PyQt6 与 qfluentwidgets 均为 GPLv3（GPL 具有传染性，衍生作品必须以相同协议发布）。其余依赖均与 GPLv3 兼容：
+
+| 依赖 | 协议 | 兼容性 |
+|---|---|---|
+| PyQt6 | GPLv3（或商业许可） | 决定项目协议 |
+| qfluentwidgets | GPLv3（非商用） | 决定项目协议 |
+| pyserial / pyte / pymodbus | BSD | ✅ 兼容 |
+| paramiko | LGPL-2.1 | ✅ 兼容 |
+| mcp (Python SDK) | MIT | ✅ 兼容 |
+| hidapi.dll | GPLv3 / BSD-3 / 原始许可 三选一 | ✅ 按 BSD-3 使用 |
+| adb 三件套 | Apache-2.0（Google 官方 platform-tools，子进程调用） | ✅ 兼容 |
+
+> 若您希望商业闭源分发，需同时向 Riverbank（PyQt6）与 qfluentwidgets 作者购买商业许可证。
+
 ## 鸣谢
 
 - [Best_README_template](https://github.com/shaojintian/Best_README_template) — 本 README 模板来源
@@ -186,3 +206,5 @@ GitHub: [BA4IHS](https://github.com/BA4IHS)
 [stars-url]: https://github.com/BA4IHS/all-in-debugger/stargazers
 [release-shield]: https://img.shields.io/github/v/release/BA4IHS/all-in-debugger.svg?style=flat-square
 [release-url]: https://github.com/BA4IHS/all-in-debugger/releases
+[license-shield]: https://img.shields.io/badge/license-GPLv3-blue.svg?style=flat-square
+[license-url]: https://github.com/BA4IHS/all-in-debugger/blob/main/LICENSE
