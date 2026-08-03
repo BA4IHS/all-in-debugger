@@ -11,6 +11,9 @@ import time
 import serial
 from PyQt6.QtCore import QObject, Qt, QThread, pyqtSignal, pyqtSlot
 
+# MCP 只读查询用的 RX 环形缓冲上限（不影响 UI 接收链路）
+RX_CAP = 65536
+
 
 class SerialWorker(QObject):
     # ── worker → UI（queued）────────────────────────────────────
@@ -21,6 +24,7 @@ class SerialWorker(QObject):
     dataWritten = pyqtSignal(int)       # 成功写入的字节数
     errorOccurred = pyqtSignal(str)     # 运行期异常
     finished = pyqtSignal()             # run() 退出，通知线程收尾
+    mcpReply = pyqtSignal(dict)         # MCP 只读查询应答 {op, data|error}
 
     def __init__(self):
         super().__init__()
@@ -29,6 +33,7 @@ class SerialWorker(QObject):
         self._quit = threading.Event()
         self._logFp = None
         self._logPath = ""
+        self._rxBuf = bytearray()
 
     # ── UI → worker（全部在 worker 线程执行）──────────────────────
 
@@ -56,6 +61,7 @@ class SerialWorker(QObject):
             return
         self._ser = ser
         self._portName = port
+        self._rxBuf.clear()
         self.portOpened.emit(port)
 
     @pyqtSlot()
@@ -116,6 +122,40 @@ class SerialWorker(QObject):
         """请求 run() 退出（关闭窗口时调用）。"""
         self._quit.set()
 
+    # ── MCP 只读查询（sigMcpQuery → mcpReply）─────────────────
+
+    @pyqtSlot(dict)
+    def requestMcpQuery(self, q: dict):
+        """q: {op: 'snapshot'} 或 {op:'rx', n}；只读，供 MCP 桥查询。"""
+        op = str(q.get("op", "snapshot"))
+        rid = q.get("id")
+        if op == "snapshot":
+            self.mcpReply.emit({"op": op, "id": rid,
+                                "data": self._snapshot()})
+        elif op == "rx":
+            self.mcpReply.emit({"op": op, "id": rid,
+                                "data": self._recentRx(int(q.get("n", 0)))})
+        else:
+            self.mcpReply.emit({"op": op, "id": rid,
+                                "error": f"未知查询 {op}"})
+
+    def _snapshot(self):
+        """当前端口状态与参数。"""
+        ser = self._ser
+        opened = ser is not None and ser.is_open
+        info = {"opened": opened, "port": self._portName,
+                "rx_buffered": len(self._rxBuf)}
+        if opened:
+            info.update({"baudrate": ser.baudrate, "bytesize": ser.bytesize,
+                         "parity": ser.parity, "stopbits": ser.stopbits})
+        return info
+
+    def _recentRx(self, n: int) -> bytes:
+        """最近 n 字节接收数据（n<=0 返回全部缓冲）。"""
+        if n <= 0:
+            return bytes(self._rxBuf)
+        return bytes(self._rxBuf[-n:])
+
     # ── 读循环（worker 线程）────────────────────────────────────
 
     def run(self):
@@ -139,6 +179,9 @@ class SerialWorker(QObject):
                 self._closePort(notify=True)
                 continue
             if data:
+                self._rxBuf.extend(data)
+                if len(self._rxBuf) > RX_CAP:
+                    del self._rxBuf[:len(self._rxBuf) - RX_CAP]
                 self._writeLog(data)
                 self.dataReceived.emit(bytes(data), time.time())
         # 收尾：确保端口与日志关闭
@@ -211,6 +254,7 @@ class SerialThread(QObject):
     sigSetDTR = pyqtSignal(bool)
     sigSetRTS = pyqtSignal(bool)
     sigSetLogFile = pyqtSignal(str)
+    sigMcpQuery = pyqtSignal(dict)      # MCP 只读查询请求
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -225,6 +269,7 @@ class SerialThread(QObject):
         self.sigSetDTR.connect(self.worker.setDTR, queued)
         self.sigSetRTS.connect(self.worker.setRTS, queued)
         self.sigSetLogFile.connect(self.worker.setLogFile, queued)
+        self.sigMcpQuery.connect(self.worker.requestMcpQuery, queued)
 
     def start(self):
         self.thread.start()

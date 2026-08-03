@@ -2,13 +2,19 @@
 """设置页：本版本 qfluentwidgets 无 SettingInterface，
 用 ScrollArea + SettingCardGroup + SettingCard 族手工搭建。
 """
+import json
+import uuid
+
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
-from PyQt6.QtWidgets import QFileDialog, QHBoxLayout, QVBoxLayout, QWidget
+from PyQt6.QtGui import QClipboard
+from PyQt6.QtWidgets import (
+    QApplication, QFileDialog, QHBoxLayout, QVBoxLayout, QWidget,
+)
 
 from qfluentwidgets import (
     ComboBox, ComboBoxSettingCard, ExpandLayout, FluentIcon, PushSettingCard,
-    RangeSettingCard, ScrollArea, SettingCard, SettingCardGroup, ToolButton,
-    setTheme,
+    RangeSettingCard, ScrollArea, SettingCard, SettingCardGroup, SpinBox,
+    SwitchSettingCard, ToolButton, setTheme,
 )
 
 from app import adb_runner as ar
@@ -95,6 +101,7 @@ class SettingPage(ScrollArea):
         self._buildReceive()
         self._buildLog()
         self._buildAdb()
+        self._buildMcp()
 
         self.setObjectName("settingInterface")
         self._container.setObjectName("settingContainer")
@@ -175,6 +182,55 @@ class SettingPage(ScrollArea):
         else:
             shown = version or "版本未知"
         self.adbCard.setContent(f"{self._adbVersionPath}  |  {shown}")
+
+    def _buildMcp(self):
+        group = SettingCardGroup("MCP 服务", self._container)
+        self.mcpSwitchCard = SwitchSettingCard(
+            FluentIcon.ROBOT, "启用 MCP 服务",
+            "向 AI 客户端暴露本调试器的收发/读写能力（重启后生效）",
+            configItem=cfg.mcpEnabled, parent=group)
+        group.addSettingCard(self.mcpSwitchCard)
+
+        self.mcpPortCard = SettingCard(
+            FluentIcon.LIBRARY, "服务端口",
+            "仅监听 127.0.0.1（重启后生效）", parent=group)
+        self.mcpPortBox = SpinBox(self.mcpPortCard)
+        self.mcpPortBox.setRange(1024, 65535)
+        self.mcpPortBox.setValue(int(qconfig.get(cfg.mcpPort)))
+        self.mcpPortCard.hBoxLayout.addWidget(
+            self.mcpPortBox, 0, Qt.AlignmentFlag.AlignRight)
+        self.mcpPortCard.hBoxLayout.addSpacing(16)
+        self.mcpPortBox.valueChanged.connect(
+            lambda v: qconfig.set(cfg.mcpPort, int(v)))
+        group.addSettingCard(self.mcpPortCard)
+
+        token = qconfig.get(cfg.mcpToken) or ""
+        if not token:
+            token = uuid.uuid4().hex[:16]
+            qconfig.set(cfg.mcpToken, token)
+        self.mcpCopyCard = PushSettingCard(
+            "复制接入配置", FluentIcon.SHARE, "AI 客户端接入",
+            f"http://127.0.0.1:{qconfig.get(cfg.mcpPort)}/mcp（Bearer 密钥已生成）",
+            parent=group)
+        self.mcpCopyCard.clicked.connect(self._copyMcpConfig)
+        group.addSettingCard(self.mcpCopyCard)
+        self._expand.addWidget(group)
+
+    def _copyMcpConfig(self):
+        snippet = {
+            "mcpServers": {
+                "serial-debugger": {
+                    "url": f"http://127.0.0.1:{qconfig.get(cfg.mcpPort)}/mcp",
+                    "headers": {
+                        "Authorization":
+                            f"Bearer {qconfig.get(cfg.mcpToken)}",
+                    },
+                }
+            }
+        }
+        QApplication.clipboard().setText(
+            json.dumps(snippet, ensure_ascii=False, indent=2),
+            QClipboard.Mode.Clipboard)
 
     def _chooseLogDir(self):
         path = QFileDialog.getExistingDirectory(self, "选择日志目录")

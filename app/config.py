@@ -1,10 +1,13 @@
 # coding: utf-8
 """应用配置：qconfig 持久化（主题/接收上限/日志目录）+ data.json（发送历史/预设命令）"""
 import json
+import sys
+import uuid
 from pathlib import Path
 
 from qfluentwidgets import QConfig, Theme, qconfig
 from qfluentwidgets.common.config import (
+    BoolValidator,
     ConfigItem,
     EnumSerializer,
     OptionsConfigItem,
@@ -13,7 +16,10 @@ from qfluentwidgets.common.config import (
     RangeValidator,
 )
 
-APP_DIR = Path(__file__).resolve().parent.parent
+if getattr(sys, 'frozen', False):
+    APP_DIR = Path(sys.executable).resolve().parent
+else:
+    APP_DIR = Path(__file__).resolve().parent.parent
 CONFIG_FILE = APP_DIR / "config.json"
 DATA_FILE = APP_DIR / "data.json"
 
@@ -41,12 +47,27 @@ class Config(QConfig):
     adbPath = ConfigItem("ADB", "AdbPath", default="adb")
     defaultModel = ConfigItem("ADB", "DefaultModel", default="")
 
+    # MCP 服务（内嵌，重启后生效）
+    mcpEnabled = OptionsConfigItem(
+        "MCP", "Enabled", default=False, validator=BoolValidator())
+    mcpPort = RangeConfigItem(
+        "MCP", "Port", default=8642, validator=RangeValidator(1024, 65535))
+    mcpToken = ConfigItem("MCP", "Token", default="")
+
 
 cfg = Config()
 
 
 def loadConfig() -> None:
     qconfig.load(str(CONFIG_FILE), cfg)
+    _ensureMcpToken()
+
+
+def _ensureMcpToken() -> None:
+    """首次启动时自动生成 MCP 密钥；已有密钥绝不覆盖/删除。"""
+    if qconfig.get(cfg.mcpToken):
+        return
+    qconfig.set(cfg.mcpToken, uuid.uuid4().hex[:16])
 
 
 def saveConfig() -> None:
