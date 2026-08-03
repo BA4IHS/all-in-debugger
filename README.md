@@ -48,7 +48,6 @@
 - [部署打包](#部署打包)
 - [使用到的框架](#使用到的框架)
 - [贡献者](#贡献者)
-  - [如何参与开源项目](#如何参与开源项目)
 - [版本控制](#版本控制)
 - [作者](#作者)
 - [鸣谢](#鸣谢)
@@ -181,15 +180,7 @@ pwsh build_nuitka.ps1
 
 ## 贡献者
 
-#### 如何参与开源项目
-
-贡献使开源社区成为一个学习、激励和创造的绝佳场所。你所作的任何贡献都是**非常感谢**的。
-
-1. Fork the Project
-2. Create your Feature Branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your Changes (`git commit -m 'Add some AmazingFeature'`)
-4. Push to the Branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request
+感谢所有参与本项目的开发者，完整名单见[贡献者列表](https://github.com/BA4IHS/all-in-debugger/graphs/contributors)。
 
 ## 版本控制
 
