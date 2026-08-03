@@ -292,29 +292,31 @@ def test_right_scrollbar_layout_and_gutter(qapp):
     assert w._cell_at(QPointF(w.width() - 2, 20))[1] == w._cols - 1
 
 
-def test_all_scrollbars_use_translucent_white_style(qapp):
+def test_all_scrollbars_use_translucent_style(qapp):
     from PyQt6.QtWidgets import QScrollBar
     from qfluentwidgets import ScrollArea
     from app.ui.scrollbar_style import (
-        NATIVE_SCROLLBAR_QSS, apply_white_scrollbars,
+        _native_qss, _fluent_colors, apply_white_scrollbars,
         install_white_scrollbars,
     )
 
     install_white_scrollbars(qapp)
-    assert NATIVE_SCROLLBAR_QSS.strip() in qapp.styleSheet()
+    # 主题自适应：深色半透明白 / 浅色半透明黑
+    assert _native_qss().strip() in qapp.styleSheet()
 
-    native = QScrollBar(Qt.Orientation.Vertical)
-    assert "rgba(255, 255, 255, 145)" in native.styleSheet() \
-        or "rgba(255, 255, 255, 145)" in qapp.styleSheet()
+    handle, _arrow, _groove = _fluent_colors()
+    handle_alpha = handle.alpha()
+    rgb = f"{handle.red()}, {handle.green()}, {handle.blue()}"
+    assert rgb in qapp.styleSheet()
 
     area = ScrollArea()
     apply_white_scrollbars(area)
     delegate = area.scrollDelagate
     for bar in (delegate.vScrollBar, delegate.hScrollBar):
-        assert bar.handle.lightColor.alpha() == 145
-        assert bar.handle.darkColor.alpha() == 145
-        assert bar.handle.lightColor.red() == 255
-        assert bar.handle.darkColor.red() == 255
+        assert bar.handle.lightColor.alpha() == handle_alpha
+        assert bar.handle.darkColor.alpha() == handle_alpha
+        assert bar.handle.lightColor.red() == handle.red()
+        assert bar.handle.darkColor.red() == handle.red()
 
 
 def test_find_bar_does_not_cover_right_scrollbar(qapp):
