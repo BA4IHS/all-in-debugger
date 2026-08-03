@@ -42,7 +42,6 @@
 - [文件目录说明](#文件目录说明)
 - [开发的架构](#开发的架构)
 - [MCP 服务](#mcp-服务)
-- [部署打包](#部署打包)
 - [使用到的框架](#使用到的框架)
 - [贡献者](#贡献者)
 - [作者](#作者)
@@ -108,7 +107,6 @@ python -m pytest tests/ -q
 all-in-debugger/
 ├── main.py                 # 入口
 ├── requirements.txt
-├── build_nuitka.ps1        # Nuitka 打包脚本
 ├── app/
 │   ├── config.py           # qconfig 配置 + data.json（历史/预设/会话）
 │   ├── serial_utils.py     # 串口纯函数：HEX/解码/换行/端口枚举
@@ -152,16 +150,6 @@ all-in-debugger/
 - 仅监听 `127.0.0.1`，Bearer Token 鉴权，默认关闭，设置页可开关
 - 覆盖串口 / HID / DAP-RTT / Modbus / SSH / ADB 的状态查询、连接、收发、读写寄存器、文件传输
 - 首次启动自动生成密钥（绝不覆盖），设置页一键复制 AI 客户端接入配置
-
-## 部署打包
-
-```sh
-pwsh build_nuitka.ps1
-```
-
-- Nuitka standalone 模式，产物 `dist/main.dist/all-in-debugger.exe`（约 159MB）
-- GUI 无控制台；已排除未使用的 numpy/scipy/PIL 依赖瘦身
-- 构建脚本自带隐私自检：用户 `config.json` / `data.json` / 日志绝不入包
 
 ## 使用到的框架
 
