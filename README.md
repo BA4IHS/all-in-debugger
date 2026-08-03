@@ -48,7 +48,6 @@
 - [部署打包](#部署打包)
 - [使用到的框架](#使用到的框架)
 - [贡献者](#贡献者)
-- [版本控制](#版本控制)
 - [作者](#作者)
 - [鸣谢](#鸣谢)
 
@@ -181,13 +180,6 @@ pwsh build_nuitka.ps1
 ## 贡献者
 
 感谢所有参与本项目的开发者，完整名单见[贡献者列表](https://github.com/BA4IHS/all-in-debugger/graphs/contributors)。
-
-## 版本控制
-
-该项目使用 Git 进行版本管理，正式发行版见 [Releases](https://github.com/BA4IHS/all-in-debugger/releases)：
-
-- **V1.0** — 首个正式版：八大模块全量交付 + Nuitka 打包
-- **V1.1** — 维护版：ADB 指令集热切换、MCP adb 工具 UTF-8 解码修复
 
 ## 作者
 
