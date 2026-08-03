@@ -202,9 +202,9 @@ GitHub: [BA4IHS](https://github.com/BA4IHS)
 - [CMSIS-DAP](https://arm-software.github.io/CMSIS_5/DAP/html/index.html) — DAP 协议规范
 
 <!-- links -->
-[stars-shield]: https://img.shields.io/github/stars/BA4IHS/all-in-debugger.svg?style=flat-square
+[stars-shield]: https://img.shields.io/github/stars/BA4IHS/all-in-debugger.svg?style=flat-square&cb=20260803
 [stars-url]: https://github.com/BA4IHS/all-in-debugger/stargazers
-[release-shield]: https://img.shields.io/github/v/release/BA4IHS/all-in-debugger.svg?style=flat-square
+[release-shield]: https://img.shields.io/github/v/release/BA4IHS/all-in-debugger.svg?style=flat-square&cb=20260803
 [release-url]: https://github.com/BA4IHS/all-in-debugger/releases
 [license-shield]: https://img.shields.io/badge/license-GPLv3-blue.svg?style=flat-square
 [license-url]: https://github.com/BA4IHS/all-in-debugger/blob/main/LICENSE
