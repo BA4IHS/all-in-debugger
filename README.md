@@ -4,10 +4,7 @@
 
 <!-- PROJECT SHIELDS -->
 
-[![Contributors][contributors-shield]][contributors-url]
-[![Forks][forks-shield]][forks-url]
 [![Stargazers][stars-shield]][stars-url]
-[![Issues][issues-shield]][issues-url]
 [![Release][release-shield]][release-url]
 
 <!-- PROJECT LOGO -->
@@ -197,13 +194,7 @@ GitHub: [BA4IHS](https://github.com/BA4IHS)
 - [CMSIS-DAP](https://arm-software.github.io/CMSIS_5/DAP/html/index.html) — DAP 协议规范
 
 <!-- links -->
-[contributors-shield]: https://img.shields.io/github/contributors/BA4IHS/all-in-debugger.svg?style=flat-square
-[contributors-url]: https://github.com/BA4IHS/all-in-debugger/graphs/contributors
-[forks-shield]: https://img.shields.io/github/forks/BA4IHS/all-in-debugger.svg?style=flat-square
-[forks-url]: https://github.com/BA4IHS/all-in-debugger/network/members
 [stars-shield]: https://img.shields.io/github/stars/BA4IHS/all-in-debugger.svg?style=flat-square
 [stars-url]: https://github.com/BA4IHS/all-in-debugger/stargazers
-[issues-shield]: https://img.shields.io/github/issues/BA4IHS/all-in-debugger.svg?style=flat-square
-[issues-url]: https://github.com/BA4IHS/all-in-debugger/issues
 [release-shield]: https://img.shields.io/github/v/release/BA4IHS/all-in-debugger.svg?style=flat-square
 [release-url]: https://github.com/BA4IHS/all-in-debugger/releases
