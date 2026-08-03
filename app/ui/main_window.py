@@ -11,11 +11,19 @@ from qfluentwidgets import (
 )
 
 from app.config import cfg, qconfig
+from app.dap_worker import DapThread
+from app.hid_worker import HidThread
+from app.modbus_core import ModbusThread
 from app.serial_worker import SerialThread
+from app.ssh_worker import SshThread
 from app.ui.adb_page import AdbPage
 from app.ui.console_page import ConsolePage
+from app.ui.dap_page import DapPage
+from app.ui.hid_page import HidPage
+from app.ui.modbus_page import ModbusPage
 from app.ui.preset_page import PresetPage
 from app.ui.setting_page import SettingPage
+from app.ui.ssh_page import SshPage
 from app.ui.window_utils import center_window
 
 ANDROID_ICON_PATH = (
@@ -47,18 +55,56 @@ class MainWindow(SplitFluentWindow):
         self.st = SerialThread(self)
         self.st.start()
 
+        # 新增调试通道工作线程（各自唯一持有原生句柄）
+        self.ht = HidThread(self)
+        self.ht.start()
+        self.dt = DapThread(self)
+        self.dt.start()
+        self.mt = ModbusThread(self)
+        self.mt.start()
+        self.sht = SshThread(self)
+        self.sht.start()
+
+        # 内嵌 MCP 服务（可选）：mcp 依赖缺失时仅禁用该功能，不影响 GUI
+        self._mcpService = None
+        if qconfig.get(cfg.mcpEnabled):
+            try:
+                from app.mcp_bridge import WorkerBridge
+                from app.mcp_server import McpService
+                bridge = WorkerBridge(self.st, self.ht, self.dt, self.mt,
+                                      self.sht)
+                self._mcpService = McpService(
+                    bridge, qconfig.get(cfg.mcpPort),
+                    qconfig.get(cfg.mcpToken))
+                self._mcpService.start()
+            except Exception:
+                self._mcpService = None
+
         self.consolePage = ConsolePage(self.st)
         self.presetPage = PresetPage()
         self.adbPage = AdbPage()
+        self.hidPage = HidPage(self.ht)
+        self.dapPage = DapPage(self.dt)
+        self.modbusPage = ModbusPage(self.mt)
+        self.sshPage = SshPage(self.sht)
         self.settingPage = SettingPage()
         self.consolePage.setObjectName("consoleInterface")
         self.presetPage.setObjectName("presetInterface")
         self.adbPage.setObjectName("adbInterface")
+        self.hidPage.setObjectName("hidInterface")
+        self.dapPage.setObjectName("dapInterface")
+        self.modbusPage.setObjectName("modbusInterface")
+        self.sshPage.setObjectName("sshInterface")
         # settingInterface 的 objectName 已在 SettingPage 内设置
 
         self.addSubInterface(self.consolePage, FluentIcon.IOT, "串口调试")
         self.addSubInterface(self.presetPage, FluentIcon.LIBRARY, "预设命令")
         self.addSubInterface(self.adbPage, ANDROID_ICON, "ADB 调试")
+        self.addSubInterface(self.hidPage, FluentIcon.CONNECT, "HID 调试")
+        self.addSubInterface(self.dapPage, FluentIcon.DEVELOPER_TOOLS,
+                             "DAP RTT")
+        self.addSubInterface(self.modbusPage, FluentIcon.LINK, "Modbus")
+        self.addSubInterface(self.sshPage, FluentIcon.GLOBE, "SSH")
         self.addSubInterface(
             self.settingPage, FluentIcon.SETTING, "设置",
             position=NavigationItemPosition.BOTTOM)
@@ -84,9 +130,19 @@ class MainWindow(SplitFluentWindow):
 
     def closeEvent(self, event: QCloseEvent):
         self._portTimer.stop()
+        if self._mcpService is not None:
+            self._mcpService.stop()
         self.consolePage.shutdown()
         self.presetPage.shutdown()
         self.adbPage.shutdown()
+        self.hidPage.shutdown()
+        self.dapPage.shutdown()
+        self.modbusPage.shutdown()
+        self.sshPage.shutdown()
         self.settingPage.shutdown()
         self.st.stop()
+        self.ht.stop()
+        self.dt.stop()
+        self.mt.stop()
+        self.sht.stop()
         super().closeEvent(event)

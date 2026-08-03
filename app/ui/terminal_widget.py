@@ -184,6 +184,7 @@ class QTerminalWidget(QWidget):
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._codec = "UTF-8"
         self._decoder = make_decoder(self._codec)
+        self._resize_cb = None
         self._enter_mode = "\r"
         self._local_echo = False
         self._feed_queue = collections.deque()
@@ -308,6 +309,10 @@ class QTerminalWidget(QWidget):
     def set_enter_mode(self, mode: str):
         self._enter_mode = mode
 
+    def set_resize_cb(self, cb):
+        """设置网格尺寸变化回调 cb(cols, rows)；SSH 页用于同步 resize_pty。"""
+        self._resize_cb = cb
+
     def set_local_echo(self, on: bool):
         self._local_echo = bool(on)
 
@@ -347,6 +352,11 @@ class QTerminalWidget(QWidget):
         if changed:
             self._cols, self._rows = cols, rows
             self._screen.resize(rows, cols)
+            if getattr(self, "_resize_cb", None) is not None:
+                try:
+                    self._resize_cb(cols, rows)
+                except Exception:      # noqa: BLE001 - 回调异常不影响渲染
+                    pass
         mt = self._max_top()
         if self._stick:
             self._top_line = mt
