@@ -10,11 +10,20 @@ $lines = @(
     "--enable-plugin=pyqt6",
     "--windows-console-mode=disable",
     "--assume-yes-for-downloads",
+    "--remove-output",
+    "--include-windows-runtime-dlls=no",
+    # 瘦身：qfluentwidgets 的亚克力模糊依赖（try/except 可选，未安装自动降级，本项目不用）
+    "--nofollow-import-to=scipy",
+    "--nofollow-import-to=numpy",
+    "--nofollow-import-to=PIL",
+    "--nofollow-import-to=colorthief",
     "--output-dir=dist",
     "--output-filename=all-in-debugger.exe",
     "--include-package=app",
     # 资源目录：DLL/adb 三件套、图标、HID 模板、ADB 型号档案（保持原相对路径）
     "--include-data-dir=app/libs=app/libs",
+    # 顶层 PE 文件可能被 data-dir 跳过，显式包含 hidapi.dll
+    "--include-data-files=app/libs/hidapi.dll=app/libs/hidapi.dll",
     "--include-data-dir=app/assets=app/assets",
     "--include-data-files=app/hid_templates.json=app/hid_templates.json",
     "--include-data-dir=app/adb_profiles=app/adb_profiles",
