@@ -219,7 +219,7 @@ class SettingPage(ScrollArea):
     def _copyMcpConfig(self):
         snippet = {
             "mcpServers": {
-                "serial-debugger": {
+                "all-in-debugger": {
                     "url": f"http://127.0.0.1:{qconfig.get(cfg.mcpPort)}/mcp",
                     "headers": {
                         "Authorization":

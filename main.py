@@ -1,5 +1,5 @@
 # coding: utf-8
-"""串口调试工具入口。"""
+"""all-in-debugger 入口。"""
 import sys
 from pathlib import Path
 

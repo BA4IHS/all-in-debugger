@@ -12,7 +12,7 @@ import threading
 from app.mcp_bridge import BridgeError, parse_hex, to_hex
 
 INSTRUCTIONS = (
-    "串口调试工具的调试能力集合：串口、USB HID、ADB、DAP-Link RTT、Modbus、SSH。"
+    "all-in-debugger 的调试能力集合：串口、USB HID、ADB、DAP-Link RTT、Modbus、SSH。"
     "典型流程：先 *_status / *_enumerate 查询，再 open/connect，"
     "然后 send/write/read。HEX 数据用空格分隔的十六进制字节表示。"
 )
@@ -41,7 +41,7 @@ def build_mcp(bridge):
     """构建 FastMCP 实例并注册全部工具。"""
     from mcp.server.fastmcp import FastMCP
 
-    mcp = FastMCP("serial-debugger", instructions=INSTRUCTIONS)
+    mcp = FastMCP("all-in-debugger", instructions=INSTRUCTIONS)
     tool = mcp.tool
 
     # ── 通用 ───────────────────────────────────────────────────
