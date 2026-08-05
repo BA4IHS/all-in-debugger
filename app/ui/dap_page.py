@@ -11,16 +11,16 @@
 import time
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QFont
+from PyQt6.QtGui import QFont, QIntValidator
 from PyQt6.QtWidgets import (
     QFileDialog, QHBoxLayout, QPlainTextEdit, QRadioButton, QVBoxLayout,
     QWidget,
 )
 
 from qfluentwidgets import (
-    BodyLabel, CaptionLabel, CardWidget, CheckBox, ComboBox, FluentIcon,
-    InfoBar, LineEdit, PrimaryPushButton, PushButton,
-    SingleDirectionScrollArea, SpinBox, SubtitleLabel, ToolButton,
+    BodyLabel, CaptionLabel, CardWidget, CheckBox, ComboBox, EditableComboBox,
+    FluentIcon, InfoBar, LineEdit, PrimaryPushButton, PushButton,
+    SingleDirectionScrollArea, SubtitleLabel, ToolButton,
     isDarkTheme, qconfig, themeColor,
 )
 
@@ -136,13 +136,18 @@ class DapPage(QWidget):
 
         crow = QHBoxLayout()
         crow.addWidget(BodyLabel("SWD 速度", card))
+        # 常见 SWD 时钟（kHz）：下拉可选，也可直接输入任意值
+        self.clockCombo = EditableComboBox(card)
+        self.clockCombo.addItems(
+            ["100", "400", "1000", "2000", "4000", "8000",
+             "10000", "12000", "20000", "50000"])
+        self.clockCombo.setCurrentText("4000")
+        self.clockCombo.setFixedWidth(110)
+        self.clockCombo.setToolTip("SWD 时钟频率（kHz），下拉选常见值或直接输入")
+        self.clockCombo.setValidator(QIntValidator(1, 50_000, self.clockCombo))
+        crow.addWidget(self.clockCombo)
+        crow.addWidget(CaptionLabel("kHz", card))
         crow.addStretch(1)
-        self.clockBox = SpinBox(card)
-        self.clockBox.setRange(10, 50_000)
-        self.clockBox.setValue(4000)
-        self.clockBox.setSuffix(" kHz")
-        self.clockBox.setMinimumWidth(90)
-        crow.addWidget(self.clockBox)
         v.addLayout(crow)
 
         self.resetCheck = CheckBox("连接后硬件复位", card)
@@ -334,9 +339,18 @@ class DapPage(QWidget):
                             duration=4000, parent=self)
             return
         p = self._probes[idx]
+        try:
+            clock_khz = int(self.clockCombo.currentText().strip() or 0)
+        except ValueError:
+            clock_khz = 0
+        if not 1 <= clock_khz <= 50_000:
+            InfoBar.warning(title="速度无效",
+                            content="请输入 1~50000 之间的 SWD 速度（kHz）",
+                            duration=4000, parent=self)
+            return
         cfg = {
             "path": p["path"],
-            "clock": self.clockBox.value() * 1000,
+            "clock": clock_khz * 1000,
             "reset": self.resetCheck.isChecked(),
             "ram_start": 0, "ram_size": 0, "cb_addr": 0,
         }
