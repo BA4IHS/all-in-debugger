@@ -54,6 +54,16 @@ class Config(QConfig):
         "MCP", "Port", default=8642, validator=RangeValidator(1024, 65535))
     mcpToken = ConfigItem("MCP", "Token", default="")
 
+    # TCP/IP 网络调试页外观（接收区/发送区字号与颜色）
+    rxFontSize = RangeConfigItem(
+        "Tcpip", "RxFontSize", default=10, validator=RangeValidator(8, 32))
+    rxTextColor = ConfigItem("Tcpip", "RxTextColor", default="#DCDCDC")
+    rxBgColor = ConfigItem("Tcpip", "RxBgColor", default="#1E1E1E")
+    txFontSize = RangeConfigItem(
+        "Tcpip", "TxFontSize", default=10, validator=RangeValidator(8, 32))
+    txTextColor = ConfigItem("Tcpip", "TxTextColor", default="#DCDCDC")
+    txBgColor = ConfigItem("Tcpip", "TxBgColor", default="#1E1E1E")
+
 
 cfg = Config()
 

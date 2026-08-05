@@ -32,7 +32,7 @@ class ReceiveController:
 
     def __init__(self, view: PlainTextEdit):
         self._view = view
-        self._pending = bytearray()
+        self._pending = []          # [(source, bytearray)] 同源块合并
         self._codec = "UTF-8"
         self._decoder = make_decoder(self._codec)
         self._hexDisplay = False
@@ -46,8 +46,16 @@ class ReceiveController:
         self._timer.timeout.connect(self._flush)
         self._timer.start()
 
-    def feed(self, data: bytes, _ts: float):
-        self._pending += data
+    def feed(self, data: bytes, _ts: float, source: str = ""):
+        """source 非空时作为该块的前缀（如 TCP Server 的客户端地址）；
+        连续同源块合并后整批渲染，跨块增量解码不受影响。"""
+        if not data:
+            return
+        source = source or ""
+        if self._pending and self._pending[-1][0] == source:
+            self._pending[-1][1] += data
+        else:
+            self._pending.append((source, bytearray(data)))
 
     def setHexDisplay(self, on: bool):
         self._hexDisplay = bool(on)
@@ -77,20 +85,28 @@ class ReceiveController:
     def _flush(self):
         if not self._pending:
             return
-        data = bytes(self._pending)
-        self._pending.clear()
+        blocks = self._pending
+        self._pending = []
         if self._paused:
             return
-        if self._hexDisplay:
-            text = format_hex(data)
+
+        parts = []
+        for source, raw in blocks:
+            data = bytes(raw)
+            if self._hexDisplay:
+                text = format_hex(data)
+            else:
+                text = decode_chunk(self._decoder, data)
+            prefix = ""
             if self._timestamp:
-                text = timestamp_str() + " " + text
-        else:
-            text = decode_chunk(self._decoder, data)
-            if not text:
-                return
-            if self._timestamp:
-                text = timestamp_str() + " " + text
+                prefix += timestamp_str() + " "
+            if source:
+                prefix += f"[{source}] "
+            if text or prefix:
+                parts.append(prefix + text)
+        if not parts:
+            return
+        text = "\n".join(parts)
 
         # 未开启自动跟随时保存当前位置。QPlainTextEdit 在光标原本位于
         # 底部时会因 appendPlainText 自动跳到新底部，需要显式恢复。
@@ -222,8 +238,8 @@ class ReceivePanel(QWidget):
             self.view.setFocus()
         self.modeChanged.emit(terminal)
 
-    def feed_log(self, data: bytes, ts: float):
-        self._ctrl.feed(data, ts)
+    def feed_log(self, data: bytes, ts: float, source: str = ""):
+        self._ctrl.feed(data, ts, source)
 
     def feed_term(self, data: bytes):
         self.terminal.feed_bytes(data)

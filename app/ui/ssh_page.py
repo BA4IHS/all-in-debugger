@@ -1,26 +1,24 @@
 # coding: utf-8
-"""SSH 调试页：交互式终端（paramiko + pyte 复用）+ 会话保存 + SFTP 面板。
+"""SSH 调试页：交互式终端（paramiko + pyte 复用）+ 会话保存 + SFTP 文件管理。
 
 - 左栏：连接卡（主机/端口/用户名/密码或私钥）、会话卡（保存/加载/删除，不存密码）
-- 右上：复用 QTerminalWidget 交互终端，窗口尺寸变化自动 resize_pty
-- 右下：SFTP 文件面板（列目录/进入/上传/下载/删除）
+- 右：复用 QTerminalWidget 交互终端，窗口尺寸变化自动 resize_pty
+- 文件管理：独立顶层窗口（SftpFileManagerWindow），不影响主窗口
 """
-import posixpath
-
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
-    QAbstractItemView, QFileDialog, QHeaderView, QHBoxLayout, QSplitter,
-    QTableWidgetItem, QVBoxLayout, QWidget,
+    QFileDialog, QHBoxLayout, QVBoxLayout, QWidget,
 )
 
 from qfluentwidgets import (
     BodyLabel, CaptionLabel, CardWidget, ComboBox, FluentIcon, InfoBar,
     LineEdit, PrimaryPushButton, PushButton, SingleDirectionScrollArea,
-    SpinBox, SubtitleLabel, TableWidget, ToolButton,
+    SpinBox, SubtitleLabel, ToolButton,
 )
 
 from app import ssh_worker as sw
 from app.config import loadData, saveData
+from app.ui.ssh_file_manager import SftpFileManagerWindow
 from app.ui.terminal_widget import QTerminalWidget
 
 SESSIONS_KEY = "ssh_sessions"
@@ -50,6 +48,7 @@ class SshPage(QWidget):
         self.sht = sht
         self._connected = False
         self._sftpPath = "."
+        self._sftpManagers = set()   # 独立 SFTP 文件管理窗口
 
         scroll = SingleDirectionScrollArea(self)
         left = QWidget()
@@ -66,18 +65,11 @@ class SshPage(QWidget):
         scroll.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
-        splitter = QSplitter(Qt.Orientation.Vertical, self)
-        splitter.addWidget(self._build_terminal())
-        splitter.addWidget(self._build_sftp_card())
-        splitter.setStretchFactor(0, 3)
-        splitter.setStretchFactor(1, 2)
-        splitter.setChildrenCollapsible(False)
-
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 40, 0, 0)
         layout.setSpacing(12)
         layout.addWidget(scroll)
-        layout.addWidget(splitter, 1)
+        layout.addWidget(self._build_terminal(), 1)
 
         self._connect_signals()
 
@@ -152,6 +144,13 @@ class SshPage(QWidget):
         self.statusLabel = CaptionLabel("未连接", card)
         self.statusLabel.setWordWrap(True)
         v.addWidget(self.statusLabel)
+
+        self.fileManagerBtn = PushButton(
+            FluentIcon.FOLDER, "文件管理", card)
+        self.fileManagerBtn.setToolTip("在独立窗口中管理远端文件（SFTP）")
+        self.fileManagerBtn.clicked.connect(
+            lambda _=False: self._open_sftp_manager())
+        v.addWidget(self.fileManagerBtn)
         return card
 
     # ── 左：会话卡 ─────────────────────────────────────────────
@@ -213,61 +212,6 @@ class SshPage(QWidget):
         v.addWidget(self.terminal, 1)
         return wrap
 
-    # ── 右：SFTP 面板 ──────────────────────────────────────────
-
-    def _build_sftp_card(self) -> CardWidget:
-        card = CardWidget()
-        v = QVBoxLayout(card)
-        v.setContentsMargins(12, 10, 12, 10)
-        v.setSpacing(6)
-        bar = QHBoxLayout()
-        bar.addWidget(SubtitleLabel("SFTP", card))
-        upBtn = ToolButton(FluentIcon.UP, card)
-        upBtn.setToolTip("上级目录")
-        upBtn.clicked.connect(self._sftp_up)
-        refreshBtn = ToolButton(FluentIcon.UPDATE, card)
-        refreshBtn.setToolTip("刷新")
-        refreshBtn.clicked.connect(self._sftp_refresh)
-        bar.addStretch(1)
-        bar.addWidget(upBtn)
-        bar.addWidget(refreshBtn)
-        v.addLayout(bar)
-
-        self.sftpPathEdit = LineEdit(card)
-        self.sftpPathEdit.setText(".")
-        self.sftpPathEdit.returnPressed.connect(self._sftp_refresh)
-        v.addWidget(self.sftpPathEdit)
-
-        self.sftpTable = TableWidget(card)
-        self.sftpTable.setColumnCount(3)
-        self.sftpTable.setHorizontalHeaderLabels(["名称", "大小", "类型"])
-        hh = self.sftpTable.horizontalHeader()
-        hh.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        hh.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        hh.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-        self.sftpTable.verticalHeader().setVisible(False)
-        self.sftpTable.setSelectionBehavior(
-            QAbstractItemView.SelectionBehavior.SelectRows)
-        self.sftpTable.setEditTriggers(
-            QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.sftpTable.setHorizontalScrollBarPolicy(
-            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.sftpTable.cellDoubleClicked.connect(self._sftp_enter)
-        v.addWidget(self.sftpTable, 1)
-
-        brow = QHBoxLayout()
-        dlBtn = PushButton("下载", card)
-        ulBtn = PushButton("上传", card)
-        rmBtn = PushButton("删除", card)
-        dlBtn.clicked.connect(self._sftp_download)
-        ulBtn.clicked.connect(self._sftp_upload)
-        rmBtn.clicked.connect(self._sftp_delete)
-        brow.addWidget(dlBtn, 1)
-        brow.addWidget(ulBtn, 1)
-        brow.addWidget(rmBtn, 1)
-        v.addLayout(brow)
-        return card
-
     # ── 信号接线 ───────────────────────────────────────────────
 
     def _connect_signals(self):
@@ -277,7 +221,6 @@ class SshPage(QWidget):
         w.closed.connect(self._on_closed)
         w.rxData.connect(self.terminal.queue_bytes)
         w.errorOccurred.connect(self._on_error)
-        w.sftpResult.connect(self._on_sftp_result)
         self.terminal.sendRequested.connect(
             lambda data: self.sht.sigWrite.emit(data))
         self.connectBtn.clicked.connect(self._on_connect)
@@ -332,8 +275,6 @@ class SshPage(QWidget):
         self.terminal.clear()
         self.terminal.setFocus()
         self._sftpPath = "."
-        self.sftpPathEdit.setText(".")
-        self._sftp_refresh()
 
     def _on_connect_failed(self, msg: str):
         self.connectBtn.setEnabled(True)
@@ -346,7 +287,6 @@ class SshPage(QWidget):
         self.connectBtn.setEnabled(True)
         self.closeBtn.setEnabled(False)
         self.statusLabel.setText("未连接")
-        self.sftpTable.setRowCount(0)
         InfoBar.info(title="SSH 已断开", content="远端连接已关闭",
                      duration=3000, parent=self)
 
@@ -421,127 +361,29 @@ class SshPage(QWidget):
         saveData(data)
         self._reload_session_combo()
 
-    # ── SFTP ───────────────────────────────────────────────────
+    # ── 文件管理（独立窗口）──────────────────────────────────
 
-    def _sftp_refresh(self):
+    def _open_sftp_manager(self):
         if not self._connected:
+            InfoBar.warning(title="请先连接 SSH",
+                            content="连接成功后即可打开 SFTP 文件管理",
+                            duration=3500, parent=self)
             return
-        self._sftpPath = self.sftpPathEdit.text().strip() or "."
-        self.sht.sigSftp.emit({"op": "list", "path": self._sftpPath})
-
-    def _sftp_up(self):
-        if not self._connected:
-            return
-        parent = posixpath.dirname(posixpath.normpath(self._sftpPath))
-        self.sftpPathEdit.setText(parent or "/")
-        self._sftp_refresh()
-
-    def _sftp_enter(self, row: int, _col: int):
-        name_item = self.sftpTable.item(row, 0)
-        type_item = self.sftpTable.item(row, 2)
-        if not name_item or not type_item or type_item.text() != "目录":
-            return
-        joined = posixpath.normpath(
-            posixpath.join(self._sftpPath, name_item.text()))
-        self.sftpPathEdit.setText(joined)
-        self._sftp_refresh()
-
-    def _selected_entry(self):
-        rows = self.sftpTable.selectionModel().selectedRows()
-        if not rows:
-            InfoBar.warning(title="未选择", content="请先在表格中选择文件",
-                            duration=3000, parent=self)
-            return None
-        row = rows[0].row()
-        name = self.sftpTable.item(row, 0).text()
-        typ = self.sftpTable.item(row, 2).text()
-        return {"name": name,
-                "remote": posixpath.normpath(
-                    posixpath.join(self._sftpPath, name)),
-                "is_dir": typ == "目录"}
-
-    def _sftp_download(self):
-        e = self._selected_entry()
-        if not e or e["is_dir"]:
-            if e and e["is_dir"]:
-                InfoBar.warning(title="不支持", content="暂不支持下载目录",
-                                duration=3000, parent=self)
-            return
-        local_dir = QFileDialog.getExistingDirectory(self, "选择保存目录")
-        if not local_dir:
-            return
-        local = posixpath.join(local_dir.replace("\\", "/"), e["name"])
-        InfoBar.info(title="下载中", content=e["remote"],
-                     duration=2000, parent=self)
-        self.sht.sigSftp.emit({"op": "download", "remote": e["remote"],
-                               "local": local})
-
-    def _sftp_upload(self):
-        if not self._connected:
-            return
-        local, _ = QFileDialog.getOpenFileName(self, "选择要上传的文件")
-        if not local:
-            return
-        name = local.replace("\\", "/").rsplit("/", 1)[-1]
-        remote = posixpath.normpath(posixpath.join(self._sftpPath, name))
-        InfoBar.info(title="上传中", content=name,
-                     duration=2000, parent=self)
-        self.sht.sigSftp.emit({"op": "upload", "local": local,
-                               "remote": remote})
-
-    def _sftp_delete(self):
-        e = self._selected_entry()
-        if not e or e["is_dir"]:
-            if e and e["is_dir"]:
-                InfoBar.warning(title="不支持", content="暂不支持删除目录",
-                                duration=3000, parent=self)
-            return
-        self.sht.sigSftp.emit({"op": "delete", "path": e["remote"]})
-
-    def _on_sftp_result(self, r: dict):
-        if not r.get("ok"):
-            InfoBar.error(title=f"SFTP {r.get('op')} 失败",
-                          content=str(r.get("error")),
-                          duration=5000, parent=self)
-            return
-        op = r.get("op")
-        if op == "list":
-            self._fill_sftp_table(r.get("data") or [])
-        elif op in ("download", "upload"):
-            InfoBar.success(title=f"{op} 完成",
-                            content=str(r.get("data")),
-                            duration=3000, parent=self)
-        elif op == "delete":
-            self._sftp_refresh()
-
-    def _fill_sftp_table(self, entries: list):
-        t = self.sftpTable
-        t.setRowCount(len(entries))
-        for i, e in enumerate(entries):
-            name = QTableWidgetItem(str(e.get("name", "")))
-            name.setFlags(name.flags() & ~Qt.ItemFlag.ItemIsEditable)
-            size = QTableWidgetItem(
-                "" if e.get("type") == "dir"
-                else self._fmt_size(int(e.get("size") or 0)))
-            size.setFlags(size.flags() & ~Qt.ItemFlag.ItemIsEditable)
-            typ = QTableWidgetItem("目录" if e.get("type") == "dir"
-                                   else "文件")
-            typ.setFlags(typ.flags() & ~Qt.ItemFlag.ItemIsEditable)
-            t.setItem(i, 0, name)
-            t.setItem(i, 1, size)
-            t.setItem(i, 2, typ)
-
-    @staticmethod
-    def _fmt_size(n: int) -> str:
-        for unit in ("B", "KB", "MB", "GB"):
-            if n < 1024 or unit == "GB":
-                return f"{n:.0f} {unit}" if unit == "B" \
-                    else f"{n:.1f} {unit}"
-            n /= 1024
-        return str(n)
+        window = SftpFileManagerWindow(
+            self.sht, self._sftpPath, connected=True,
+            conn_label=self.statusLabel.text())
+        self._sftpManagers.add(window)
+        window.destroyed.connect(
+            lambda _=None, w=window: self._sftpManagers.discard(w))
+        window.show()
+        window.raise_()
+        window.activateWindow()
 
     # ── 生命周期 ───────────────────────────────────────────────
 
     def shutdown(self):
+        for w in list(self._sftpManagers):
+            w.close()
+        self._sftpManagers.clear()
         if self._connected:
             self.sht.sigClose.emit()

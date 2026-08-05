@@ -12,8 +12,9 @@ import threading
 from app.mcp_bridge import BridgeError, parse_hex, to_hex
 
 INSTRUCTIONS = (
-    "all-in-debugger 的调试能力集合：串口、USB HID、ADB、DAP-Link RTT、Modbus、SSH。"
-    "典型流程：先 *_status / *_enumerate 查询，再 open/connect，"
+    "all-in-debugger 的调试能力集合：串口、USB HID、ADB、DAP-Link RTT、Modbus、SSH、"
+    "TCP/IP 网络（UDP/TCP Server/TCP Client）。"
+    "典型流程：先 *_status / *_enumerate 查询，再 open/connect/start，"
     "然后 send/write/read。HEX 数据用空格分隔的十六进制字节表示。"
 )
 
@@ -363,6 +364,59 @@ def build_mcp(bridge):
         import anyio
         return await anyio.to_thread.run_sync(
             lambda: bridge.ssh_file_list(path))
+
+    # ── TCP/IP（UDP / TCP Server / TCP Client）────────────
+
+    @tool()
+    @_guard
+    async def tcpip_status() -> dict:
+        """查询网络调试（TCP/UDP）连接状态与客户端列表。"""
+        import anyio
+        return await anyio.to_thread.run_sync(bridge.tcpip_status)
+
+    @tool()
+    @_guard
+    async def tcpip_start(mode: str, local_host: str = "",
+                          local_port: int = 0, remote_host: str = "",
+                          remote_port: int = 0) -> dict:
+        """启动网络连接。mode: 'tcp_server'（监听本地端口）| 'tcp_client'
+        （连接远程主机）| 'udp'（绑定本地并向目标主机发送，支持广播）。"""
+        import anyio
+        return await anyio.to_thread.run_sync(
+            lambda: bridge.tcpip_start(mode, local_host, local_port,
+                                       remote_host, remote_port))
+
+    @tool()
+    @_guard
+    async def tcpip_stop() -> dict:
+        """断开当前网络连接。"""
+        import anyio
+        return await anyio.to_thread.run_sync(bridge.tcpip_stop)
+
+    @tool()
+    @_guard
+    async def tcpip_send(data: str, target: str = "") -> dict:
+        """发送 HEX 数据。TCP Server 模式 target 填 'ALL' 广播或具体
+        客户端地址（用 tcpip_list_clients 查询）；其余模式忽略。"""
+        import anyio
+        return await anyio.to_thread.run_sync(
+            lambda: bridge.tcpip_send(data, target))
+
+    @tool()
+    @_guard
+    async def tcpip_list_clients() -> list:
+        """列出 TCP Server 当前已连接的客户端地址。"""
+        import anyio
+        return await anyio.to_thread.run_sync(
+            lambda: bridge.tcpip_list_clients())
+
+    @tool()
+    @_guard
+    async def tcpip_close_client(addr: str) -> dict:
+        """断开指定 TCP Server 客户端；addr 为空串 = 全部断开。"""
+        import anyio
+        return await anyio.to_thread.run_sync(
+            lambda: bridge.tcpip_close_client(addr))
 
     return mcp
 

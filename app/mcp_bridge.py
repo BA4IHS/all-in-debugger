@@ -51,12 +51,13 @@ def parse_hex(text: str) -> bytes:
 class WorkerBridge:
     """把同步调用转发到四个 worker 线程，与 GUI 共享同一连接。"""
 
-    def __init__(self, st, ht, dt, mt, sht=None):
+    def __init__(self, st, ht, dt, mt, sht=None, tp=None):
         self.st = st   # SerialThread
         self.ht = ht   # HidThread
         self.dt = dt   # DapThread
         self.mt = mt   # ModbusThread
         self.sht = sht  # SshThread（可选）
+        self.tp = tp    # TcpipThread（可选）
         self._hid_cache = []
 
     # ── 通用机制 ───────────────────────────────────────────────
@@ -136,7 +137,8 @@ class WorkerBridge:
                             ("hid", self.ht, {"op": "snapshot"}),
                             ("dap", self.dt, {"op": "snapshot"}),
                             ("modbus", self.mt, {"op": "snapshot"}),
-                            ("ssh", self.sht, {"op": "snapshot"})):
+                            ("ssh", self.sht, {"op": "snapshot"}),
+                            ("tcpip", self.tp, {"op": "status"})):
             if th is None:
                 out[name] = {"error": "模块未启用"}
                 continue
@@ -393,6 +395,61 @@ class WorkerBridge:
         self._ssh_required()
         return self._query(self.sht, {"op": "list", "path": str(path)},
                            timeout=DEFAULT_TIMEOUT + 3.0)
+
+    # ── TCP/IP（UDP / TCP Server / TCP Client）───────────────
+
+    def _tcpip_required(self):
+        if self.tp is None:
+            raise BridgeError("TCP/IP 模块未启用")
+
+    def tcpip_status(self):
+        self._tcpip_required()
+        return self._query(self.tp, {"op": "status"})
+
+    def tcpip_start(self, mode: str, local_host: str = "",
+                    local_port: int = 0, remote_host: str = "",
+                    remote_port: int = 0, timeout: float = 12.0):
+        """mode: 'tcp_server' | 'tcp_client' | 'udp'。"""
+        self._tcpip_required()
+        if mode not in ("tcp_server", "tcp_client", "udp"):
+            raise BridgeError(f"未知模式：{mode}")
+        cfg = {"mode": str(mode), "local_host": str(local_host or ""),
+               "local_port": int(local_port or 0),
+               "remote_host": str(remote_host or ""),
+               "remote_port": int(remote_port or 0)}
+        args = self._emit_wait(
+            [self.tp.worker.started],
+            [self.tp.worker.startFailed, self.tp.worker.errorOccurred],
+            lambda: self.tp.sigStart.emit(cfg),
+            max(timeout, DEFAULT_TIMEOUT), "网络连接")
+        return args[0]
+
+    def tcpip_stop(self):
+        self._tcpip_required()
+        self.tp.sigStop.emit()
+        return {"ok": True}
+
+    def tcpip_send(self, data: str, target: str = "",
+                   timeout: float = 5.0):
+        """发送 HEX 数据；TCP Server 模式 target='ALL' 或客户端地址。"""
+        self._tcpip_required()
+        payload = parse_hex(data)
+        self._emit_wait(
+            [self.tp.worker.dataWritten],
+            [self.tp.worker.errorOccurred],
+            lambda: self.tp.sigSend.emit(
+                {"data": payload, "target": str(target or "")}),
+            max(timeout, DEFAULT_TIMEOUT), "网络发送")
+        return {"length": len(payload)}
+
+    def tcpip_list_clients(self):
+        self._tcpip_required()
+        return self._query(self.tp, {"op": "status"})
+
+    def tcpip_close_client(self, addr: str):
+        self._tcpip_required()
+        self.tp.sigCloseClient.emit(str(addr or ""))
+        return {"ok": True}
 
     # ── ADB（subprocess 直连，不经 worker）────────────────────
 

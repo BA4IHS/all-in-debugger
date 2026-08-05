@@ -4,6 +4,8 @@
 流程：连接（密码或私钥）→ invoke_shell 开交互终端（rx 轮询 + 写/resize），
 SFTP 与命令执行作为独立操作复用同一 SSH 连接；MCP 查询走 sigMcpQuery → mcpReply。
 """
+import posixpath
+import shlex
 import socket
 import stat as statmod
 import threading
@@ -148,7 +150,7 @@ class SshWorker(QObject):
 
     @pyqtSlot(dict)
     def requestSftp(self, req: dict):
-        """req: {op:'list'|'upload'|'download'|'mkdir'|'delete', ...}"""
+        """req: {op:'list'|'upload'|'download'|'mkdir'|'delete'|'delete_dir', ...}"""
         op = str((req or {}).get("op", "list"))
         if not self._connected or self._client is None:
             self.sftpResult.emit({"op": op, "ok": False,
@@ -171,6 +173,26 @@ class SshWorker(QObject):
             elif op == "delete":
                 self._sftp.remove(str(req["path"]))
                 data = {"path": req["path"]}
+            elif op == "delete_dir":
+                target = posixpath.normpath(
+                    str(req.get("path") or "").strip())
+                # 空串经 normpath 会变成 '.', 同样属于根目录类危险输入
+                if target in ("", ".", "/"):
+                    self.sftpResult.emit({"op": op, "ok": False,
+                                          "error": "禁止删除根目录"})
+                    return
+                # normalize 取远端绝对路径，避免 exec 与 SFTP 的 cwd 差异；
+                # 归一化后再查一次根，拦截 '..'、'/..' 等变形输入
+                abs_target = self._sftp.normalize(target)
+                if abs_target in ("", "/"):
+                    self.sftpResult.emit({"op": op, "ok": False,
+                                          "error": "禁止删除根目录"})
+                    return
+                res = self._do_exec(f"rm -rf -- {shlex.quote(abs_target)}",
+                                    120)
+                if "error" in res:
+                    raise RuntimeError(res["error"])
+                data = {"path": abs_target}
             else:
                 self.sftpResult.emit({"op": op, "ok": False,
                                       "error": f"未知操作 {op}"})

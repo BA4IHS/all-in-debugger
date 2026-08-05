@@ -1,6 +1,6 @@
 # all-in-debugger
 
-一站式硬件调试工具集：串口 / ADB / USB HID / DAP-link RTT / Modbus / SSH，内嵌 MCP 服务供 AI 客户端调用。
+一站式硬件调试工具集：串口 / ADB / USB HID / DAP-link RTT / Modbus / SSH / TCP-IP 网络，内嵌 MCP 服务供 AI 客户端调用。
 
 <!-- PROJECT SHIELDS -->
 
@@ -62,6 +62,7 @@
 | **DAP-link RTT** | 纯 Python CMSIS-DAP/SWD 直连（不依赖厂商 DLL）、IDCODE 读取、SEGGER RTT 多通道收发 |
 | **Modbus** | RTU/TCP 主站，FC01–06/15/16；Poll 式网格数据表（每寄存器一格、逐格数据类型、双击写入）、周期轮询 |
 | **SSH** | paramiko 交互终端、密码/私钥认证、会话保存（密码不落盘）、SFTP 目录浏览/上传/下载/删除 |
+| **TCP/IP 网络** | UDP / TCP Server / TCP Client 三模式；TCP Server 多客户端管理（发送目标指定/全体广播/断开选中与全部）、文本/HEX 收发、时间戳、终端模式、周期发送、文件发送（整包或按包大小+间隔分包）、原始字节日志（.bin）、收发区外观自定义（字号/文字色/背景色） |
 | **内容查找** | 串口日志、各终端 `Ctrl+F` 查找，匹配计数、循环跳转、结果高亮 |
 | **主题** | 浅色 / 深色 / 跟随系统，全控件主题自适应 |
 
@@ -122,7 +123,7 @@ python main.py
 python -m pytest tests/ -q
 ```
 
-测试包含纯函数单测与 **无需硬件** 的 worker 端到端测试（pyserial `loop://` 回环、fake paramiko 服务端等），当前 **138 项全部通过**。
+测试包含纯函数单测与 **无需硬件** 的 worker 端到端测试（pyserial `loop://` 回环、fake paramiko 服务端等）。
 
 ## 文件目录说明
 
@@ -142,15 +143,18 @@ all-in-debugger/
 │   ├── dap_worker.py       # DAP/RTT 轮询线程
 │   ├── modbus_core.py      # pymodbus 客户端封装 + 收发线程
 │   ├── ssh_worker.py       # paramiko SSH/SFTP 线程
+│   ├── tcpip_utils.py      # TCP/IP 纯函数：地址/端口校验、来源格式化
+│   ├── tcpip_worker.py     # TCP/IP 收发线程（selectors 多路复用 socket）
 │   ├── mcp_bridge.py       # MCP 桥接（跨线程信号转发）
-│   ├── mcp_server.py       # 内嵌 MCP 服务（37 个工具）
+│   ├── mcp_server.py       # 内嵌 MCP 服务（43 个工具）
 │   ├── libs/               # hidapi.dll + adb 三件套（随程序交付）
 │   └── ui/
-│       ├── main_window.py  # SplitFluentWindow 八页面
+│       ├── main_window.py  # SplitFluentWindow 九页面
 │       ├── console_page.py # 主调试页（左配置 + 右收发）
 │       ├── terminal_widget.py  # pyte 仿真 + 自绘终端
 │       ├── preset_page.py / adb_page.py / adb_file_manager.py
-│       ├── hid_page.py / dap_page.py / modbus_page.py / ssh_page.py
+│       ├── hid_page.py / dap_page.py / modbus_page.py
+│       ├── ssh_page.py / ssh_file_manager.py / tcpip_page.py
 │       ├── console_style.py    # 日志/终端深色主题适配
 │       └── setting_page.py     # 主题/容量/MCP 开关与密钥
 └── tests/                  # 纯函数单测 + worker 端到端测试
@@ -168,10 +172,10 @@ all-in-debugger/
 
 ## MCP 服务
 
-内嵌 streamable HTTP MCP 服务（FastMCP + uvicorn），向 AI 客户端暴露 **37 个调试工具**：
+内嵌 streamable HTTP MCP 服务（FastMCP + uvicorn），向 AI 客户端暴露 **43 个调试工具**：
 
 - 仅监听 `127.0.0.1`，Bearer Token 鉴权，默认关闭，设置页可开关
-- 覆盖串口 / HID / DAP-RTT / Modbus / SSH / ADB 的状态查询、连接、收发、读写寄存器、文件传输
+- 覆盖串口 / HID / DAP-RTT / Modbus / SSH / ADB / TCP-IP 的状态查询、连接、收发、读写寄存器、文件传输
 - 首次启动自动生成密钥（绝不覆盖），设置页一键复制 AI 客户端接入配置
 
 ## 使用到的框架
