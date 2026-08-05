@@ -19,6 +19,9 @@ dist/
 .coverage
 htmlcov/
 
+# Local-only test suite (not committed)
+tests/
+
 # Editor / IDE
 .vscode/
 .idea/
@@ -42,5 +45,5 @@ _*.png
 Thumbs.db
 Desktop.ini
 .DS_Store
-app/adb_profiles/T153_tina_ЦёБо±н.md
+app/adb_profiles/T153_tina_ЦёпїЅпїЅпїЅ.md
 app/T153_tina.json

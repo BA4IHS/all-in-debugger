@@ -40,7 +40,7 @@
 - [上手指南](#上手指南)
   - [下载运行（推荐）](#下载运行推荐)
   - [源码运行](#源码运行)
-  - [测试](#测试)
+  - [打包发布](#打包发布)
 - [文件目录说明](#文件目录说明)
 - [开发的架构](#开发的架构)
 - [MCP 服务](#mcp-服务)
@@ -117,13 +117,28 @@ python main.py
 
 > 注意：本项目的 qfluentwidgets 为 **PyQt6** 版本，不要安装 `PyQt5-Fluent-Widgets`（PyQt5/PyQt6 不能混用）。
 
-### 测试
+### 打包发布
 
-```sh
-python -m pytest tests/ -q
+使用 [Nuitka](https://nuitka.net) 原生编译打包，产出 standalone 目录并压缩为 7z 归档（系统要求 Windows 10/11 x64）：
+
+```bat
+build.bat                 :: 完整打包（standalone + 7z，首次约 10-30 分钟）
+build.bat --dry-run       :: 只打印将执行的 Nuitka 命令
+build.bat --no-archive    :: 只编译，不压缩
 ```
 
-测试包含纯函数单测与 **无需硬件** 的 worker 端到端测试（pyserial `loop://` 回环、fake paramiko 服务端等）。
+产物说明：
+
+- `dist/main.dist/` — 免 Python 运行目录，直接双击 `all-in-debugger.exe`
+- `dist/all-in-debugger-1.0.0.7z` — 发布归档（机器无 7-Zip 时自动回退 `.zip`）
+
+打包注意事项：
+
+- 需要 C 编译器：MSVC（VS Build Tools）或 MinGW64；未检测到时会自动下载 MinGW64
+- `app/libs/`（hidapi.dll + 官方 adb 三件套）与 `app/assets/`、`app/adb_profiles/`、`app/hid_templates.json` 会自动随包携带（frozen 模式路径定位已内置）
+- **`config.json` / `data.json` 绝不打包**（含 MCP 密钥，只打包 `--include-data-*` 指定的文件；编译后脚本另有防御检查兜底），首次启动在 exe 旁自动生成
+- **无终端模式**：`--windows-console-mode=disable` 不弹控制台；编译后自动校验 exe 的 PE 子系统为 `WINDOWS_GUI`（Subsystem=2），确认无终端
+- **体积优化**：`--lto=yes` 链接期优化 + 排除 Qt tls 插件与翻译 + 裁剪无用图片格式插件（qgif/qicns/qpdf/qtga/qtiff/qwbmp/qwebp），Qt 插件目录约 3.9MB → 1.9MB
 
 ## 文件目录说明
 
@@ -131,33 +146,32 @@ python -m pytest tests/ -q
 all-in-debugger/
 ├── main.py                 # 入口
 ├── requirements.txt
-├── app/
-│   ├── config.py           # qconfig 配置 + data.json（历史/预设/会话）
-│   ├── serial_utils.py     # 串口纯函数：HEX/解码/换行/端口枚举
-│   ├── serial_worker.py    # 串口收发线程（阻塞读循环 + MCP 查询）
-│   ├── native.py           # 统一 DLL 加载器（app/libs/）
-│   ├── hid_binding.py      # hidapi.dll 绑定（HID 与 DAP 共用）
-│   ├── hid_worker.py       # HID 收发线程
-│   ├── dap_core.py         # CMSIS-DAP/SWD 协议（HID 直连）
-│   ├── dap_rtt.py          # SEGGER RTT 控制块扫描/通道读写
-│   ├── dap_worker.py       # DAP/RTT 轮询线程
-│   ├── modbus_core.py      # pymodbus 客户端封装 + 收发线程
-│   ├── ssh_worker.py       # paramiko SSH/SFTP 线程
-│   ├── tcpip_utils.py      # TCP/IP 纯函数：地址/端口校验、来源格式化
-│   ├── tcpip_worker.py     # TCP/IP 收发线程（selectors 多路复用 socket）
-│   ├── mcp_bridge.py       # MCP 桥接（跨线程信号转发）
-│   ├── mcp_server.py       # 内嵌 MCP 服务（43 个工具）
-│   ├── libs/               # hidapi.dll + adb 三件套（随程序交付）
-│   └── ui/
-│       ├── main_window.py  # SplitFluentWindow 九页面
-│       ├── console_page.py # 主调试页（左配置 + 右收发）
-│       ├── terminal_widget.py  # pyte 仿真 + 自绘终端
-│       ├── preset_page.py / adb_page.py / adb_file_manager.py
-│       ├── hid_page.py / dap_page.py / modbus_page.py
-│       ├── ssh_page.py / ssh_file_manager.py / tcpip_page.py
-│       ├── console_style.py    # 日志/终端深色主题适配
-│       └── setting_page.py     # 主题/容量/MCP 开关与密钥
-└── tests/                  # 纯函数单测 + worker 端到端测试
+└── app/
+    ├── config.py           # qconfig 配置 + data.json（历史/预设/会话）
+    ├── serial_utils.py     # 串口纯函数：HEX/解码/换行/端口枚举
+    ├── serial_worker.py    # 串口收发线程（阻塞读循环 + MCP 查询）
+    ├── native.py           # 统一 DLL 加载器（app/libs/）
+    ├── hid_binding.py      # hidapi.dll 绑定（HID 与 DAP 共用）
+    ├── hid_worker.py       # HID 收发线程
+    ├── dap_core.py         # CMSIS-DAP/SWD 协议（HID 直连）
+    ├── dap_rtt.py          # SEGGER RTT 控制块扫描/通道读写
+    ├── dap_worker.py       # DAP/RTT 轮询线程
+    ├── modbus_core.py      # pymodbus 客户端封装 + 收发线程
+    ├── ssh_worker.py       # paramiko SSH/SFTP 线程
+    ├── tcpip_utils.py      # TCP/IP 纯函数：地址/端口校验、来源格式化
+    ├── tcpip_worker.py     # TCP/IP 收发线程（selectors 多路复用 socket）
+    ├── mcp_bridge.py       # MCP 桥接（跨线程信号转发）
+    ├── mcp_server.py       # 内嵌 MCP 服务（43 个工具）
+    ├── libs/               # hidapi.dll + adb 三件套（随程序交付）
+    └── ui/
+        ├── main_window.py  # SplitFluentWindow 九页面
+        ├── console_page.py # 主调试页（左配置 + 右收发）
+        ├── terminal_widget.py  # pyte 仿真 + 自绘终端
+        ├── preset_page.py / adb_page.py / adb_file_manager.py
+        ├── hid_page.py / dap_page.py / modbus_page.py
+        ├── ssh_page.py / ssh_file_manager.py / tcpip_page.py
+        ├── console_style.py    # 日志/终端深色主题适配
+        └── setting_page.py     # 主题/容量/MCP 开关与密钥
 ```
 
 ## 开发的架构
