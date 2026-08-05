@@ -26,6 +26,7 @@ class DapWorker(QObject):
     dataReceived = pyqtSignal(str, bytes, float)  # 通道名, 数据, ts
     dataWritten = pyqtSignal(str, int)
     errorOccurred = pyqtSignal(str)
+    resetDone = pyqtSignal()
     finished = pyqtSignal()
     mcpReply = pyqtSignal(dict)         # MCP 只读查询应答 {op, data|error}
 
@@ -118,6 +119,20 @@ class DapWorker(QObject):
             self.errorOccurred.emit(f"RTT 写入失败：{e}")
             return
         self.dataWritten.emit(channel_name, n)
+
+    @pyqtSlot()
+    def requestReset(self):
+        """硬件复位目标（拉低再释放 nRESET），保持 SWD/RTT 连接。"""
+        if not self._probe.opened:
+            self.errorOccurred.emit("调试器未连接")
+            return
+        try:
+            self._probe.reset_target()
+            time.sleep(0.1)
+        except DapError as e:
+            self.errorOccurred.emit(f"硬件复位失败：{e}")
+            return
+        self.resetDone.emit()
 
     @pyqtSlot()
     def requestClose(self):
@@ -227,6 +242,7 @@ class DapThread(QObject):
     sigStartRtt = pyqtSignal()
     sigStopRtt = pyqtSignal()
     sigWrite = pyqtSignal(str, bytes)
+    sigReset = pyqtSignal()
     sigMcpQuery = pyqtSignal(dict)      # MCP 只读查询请求
 
     def __init__(self, parent=None):
@@ -241,6 +257,7 @@ class DapThread(QObject):
         self.sigStartRtt.connect(self.worker.requestStartRtt, queued)
         self.sigStopRtt.connect(self.worker.requestStopRtt, queued)
         self.sigWrite.connect(self.worker.requestWrite, queued)
+        self.sigReset.connect(self.worker.requestReset, queued)
         self.sigMcpQuery.connect(self.worker.requestMcpQuery, queued)
 
     def start(self):

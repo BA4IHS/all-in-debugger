@@ -21,6 +21,7 @@ from qfluentwidgets import (
     BodyLabel, CaptionLabel, CardWidget, CheckBox, ComboBox, FluentIcon,
     InfoBar, LineEdit, PrimaryPushButton, PushButton,
     SingleDirectionScrollArea, SpinBox, SubtitleLabel, ToolButton,
+    isDarkTheme, qconfig, themeColor,
 )
 
 from app import serial_utils as su
@@ -74,6 +75,41 @@ class DapPage(QWidget):
         self._set_connected(False)
         self.dllLabel.setText(dap_core.load_info())
         self._on_cb_mode()
+        self._apply_radio_style()
+        qconfig.themeChangedFinished.connect(self._apply_radio_style)
+
+    @staticmethod
+    def _radio_qss() -> str:
+        """原生 QRadioButton 在深色主题下无主题适配，选中圆点会"消失"。
+
+        手动补 QSS：未选中为灰环，选中为实心主题色圆点（与其他控件配色一致），
+        文字随主题切换深浅色。注意 checked 不能写 border: none —— Qt 样式表中
+        border-radius 依赖 border 参与绘制，去掉 border 后圆角失效，圆点会渲染成方形，
+        且 border-radius 需等于外框尺寸（width + 2*border）的一半才是标准圆。"""
+        border = "#5a5a5a" if isDarkTheme() else "#999999"
+        color = themeColor().name()
+        text = "#d8d8d8" if isDarkTheme() else "#1f1f1f"
+        return (
+            f"QRadioButton {{ background-color: transparent; color: {text}; }}"
+            "QRadioButton::indicator { width: 14px; height: 14px; "
+            f"border-radius: 9px; border: 2px solid {border}; "
+            "background-color: transparent; }"
+            "QRadioButton::indicator:hover, "
+            "QRadioButton::indicator:pressed { "
+            f"border-radius: 9px; border: 2px solid {border}; "
+            "background-color: transparent; }"
+            "QRadioButton::indicator:checked, "
+            "QRadioButton::indicator:checked:hover, "
+            "QRadioButton::indicator:checked:pressed { "
+            f"border-radius: 9px; border: 2px solid {color}; "
+            f"background-color: {color}; }}"
+        )
+
+    def _apply_radio_style(self):
+        qss = self._radio_qss()
+        for r in (self.cbAutoRadio, self.cbAddrRadio, self.cbRegionRadio,
+                  self.modeEndRadio, self.modeCharRadio):
+            r.setStyleSheet(qss)
 
     # ── 左：连接设置 ───────────────────────────────────────────
 
@@ -116,8 +152,12 @@ class DapPage(QWidget):
         self.openBtn = PrimaryPushButton("连接", card)
         self.closeBtn = PushButton("断开", card)
         self.closeBtn.setEnabled(False)
+        self.resetBtn = PushButton("复位", card)
+        self.resetBtn.setEnabled(False)
+        self.resetBtn.setToolTip("硬件复位目标（需连接 RESET 线），保持 SWD/RTT 连接")
         brow.addWidget(self.openBtn, 1)
         brow.addWidget(self.closeBtn, 1)
+        brow.addWidget(self.resetBtn, 1)
         v.addLayout(brow)
 
         self.statusLabel = CaptionLabel("未连接", card)
@@ -262,8 +302,10 @@ class DapPage(QWidget):
         w.errorOccurred.connect(
             lambda msg: InfoBar.error(title="DAP/RTT 错误", content=msg,
                                       duration=6000, parent=self.rxView))
+        w.resetDone.connect(self._on_reset_done)
         self.openBtn.clicked.connect(self._on_open)
         self.closeBtn.clicked.connect(lambda _=False: self.dt.sigClose.emit())
+        self.resetBtn.clicked.connect(lambda _=False: self.dt.sigReset.emit())
         self.chCombo.currentTextChanged.connect(self._on_channel_changed)
 
     # ── 枚举 / 连接 ────────────────────────────────────────────
@@ -357,12 +399,16 @@ class DapPage(QWidget):
     def _set_connected(self, on: bool):
         self.openBtn.setEnabled(not on)
         self.closeBtn.setEnabled(on)
+        self.resetBtn.setEnabled(on)
         self.sendBtn.setEnabled(on)
         if not on:
             self.statusLabel.setText("未连接")
             self.chLabel.setText("通道：-")
             self._channels = []
             self._down_channels = []
+
+    def _on_reset_done(self):
+        self.statusLabel.setText("目标已硬件复位（RTT 连接保持）")
 
     # ── 通道视图 ───────────────────────────────────────────────
 
