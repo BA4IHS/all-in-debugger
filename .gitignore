@@ -29,6 +29,9 @@ htmlcov/
 # Runtime / user-generated data
 config.json
 data.json
+
+# Local AI tooling
+.qoder/
 logs/
 adb_report_*.txt
 
