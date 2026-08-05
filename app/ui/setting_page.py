@@ -12,13 +12,81 @@ from PyQt6.QtWidgets import (
 )
 
 from qfluentwidgets import (
-    ComboBox, ComboBoxSettingCard, ExpandLayout, FluentIcon, PushSettingCard,
-    RangeSettingCard, ScrollArea, SettingCard, SettingCardGroup, SpinBox,
-    SwitchSettingCard, ToolButton, setTheme,
+    BodyLabel, CaptionLabel, ComboBox, ComboBoxSettingCard, ExpandLayout,
+    FluentIcon, MessageBoxBase, PushSettingCard, RangeSettingCard, ScrollArea,
+    SettingCard, SettingCardGroup, SpinBox, SubtitleLabel, SwitchSettingCard,
+    ToolButton, setTheme,
 )
 
 from app import adb_runner as ar
 from app.config import cfg, qconfig
+
+# 关于信息
+APP_NAME = "all-in-debugger"
+APP_VERSION = "v1.1"
+APP_AUTHOR = "hongshi"
+PROJECT_URL = "https://github.com/BA4IHS/all-in-debugger"
+AUTHOR_URL = "https://github.com/BA4IHS"
+# 使用的框架及开源项目（与 README「使用到的框架」一致）
+FRAMEWORKS = [
+    ("PyQt6", "https://www.riverbankcomputing.com/software/pyqt/"),
+    ("qfluentwidgets", "https://qfluentwidgets.com"),
+    ("pyserial", "https://pyserial.readthedocs.io"),
+    ("pyte", "https://github.com/selectel/pyte"),
+    ("pymodbus", "https://pymodbus.readthedocs.io"),
+    ("paramiko", "https://www.paramiko.org"),
+    ("FastMCP + uvicorn",
+     "https://github.com/modelcontextprotocol/python-sdk"),
+    ("Nuitka", "https://nuitka.net"),
+]
+
+
+class AboutDialog(MessageBoxBase):
+    """关于弹窗：应用信息 / 使用框架 / 项目与作者主页。"""
+
+    LINK_COLOR = "#4cc2ff"          # 主题蓝，深浅主题下均清晰
+
+    def __init__(self, parent=None):
+        super().__init__(parent=parent)
+        self.titleLabel = SubtitleLabel(APP_NAME, self)
+        self.versionLabel = CaptionLabel(
+            f"版本 {APP_VERSION} · 作者 {APP_AUTHOR}", self)
+        self.fwTitle = CaptionLabel("使用的框架及开源项目：", self)
+
+        self.fwLabel = BodyLabel(self)
+        self.fwLabel.setText(
+            "".join(f'<a href="{u}" style="color:{self.LINK_COLOR};">'
+                    f"{n}</a><br>" for n, u in FRAMEWORKS))
+        self.fwLabel.setOpenExternalLinks(True)
+        self.fwLabel.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextBrowserInteraction)
+
+        self.projectLabel = BodyLabel(
+            f'项目主页：<a href="{PROJECT_URL}" '
+            f'style="color:{self.LINK_COLOR};">{PROJECT_URL}</a>', self)
+        self.projectLabel.setOpenExternalLinks(True)
+        self.projectLabel.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextBrowserInteraction)
+
+        self.authorLabel = BodyLabel(
+            f'作者主页：<a href="{AUTHOR_URL}" '
+            f'style="color:{self.LINK_COLOR};">{AUTHOR_URL}</a>', self)
+        self.authorLabel.setOpenExternalLinks(True)
+        self.authorLabel.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextBrowserInteraction)
+
+        self.viewLayout.addWidget(self.titleLabel)
+        self.viewLayout.addWidget(self.versionLabel)
+        self.viewLayout.addSpacing(4)
+        self.viewLayout.addWidget(self.fwTitle)
+        self.viewLayout.addWidget(self.fwLabel)
+        self.viewLayout.addSpacing(4)
+        self.viewLayout.addWidget(self.projectLabel)
+        self.viewLayout.addWidget(self.authorLabel)
+
+        self.hideCancelButton()
+        self.yesButton.setText("确定")
+        self.widget.setFixedWidth(420)
 
 
 class _AdbModelCard(SettingCard):
@@ -102,6 +170,7 @@ class SettingPage(ScrollArea):
         self._buildLog()
         self._buildAdb()
         self._buildMcp()
+        self._buildAbout()
 
         self.setObjectName("settingInterface")
         self._container.setObjectName("settingContainer")
@@ -215,6 +284,19 @@ class SettingPage(ScrollArea):
         self.mcpCopyCard.clicked.connect(self._copyMcpConfig)
         group.addSettingCard(self.mcpCopyCard)
         self._expand.addWidget(group)
+
+    def _buildAbout(self):
+        group = SettingCardGroup("关于", self._container)
+        self.aboutCard = PushSettingCard(
+            "查看", FluentIcon.INFO, "关于",
+            f"{APP_NAME} {APP_VERSION} · 作者 {APP_AUTHOR}", parent=group)
+        self.aboutCard.clicked.connect(self._showAbout)
+        group.addSettingCard(self.aboutCard)
+        self._expand.addWidget(group)
+
+    def _showAbout(self):
+        dlg = AboutDialog(self.window())
+        dlg.exec()
 
     def _copyMcpConfig(self):
         snippet = {
