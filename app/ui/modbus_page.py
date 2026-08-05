@@ -221,7 +221,9 @@ class ModbusPage(QWidget):
         self.addrBox.setRange(0, 65535)
         self.addrBox.setMinimumWidth(128)
         r2.addWidget(self.addrBox, 1)
-        # r2.addWidget(BodyLabel("数量", card))
+        
+        # 挤掉了换行
+        # r2.addWidget(BodyLabel("数量", card))  
         # self.countBox = SpinBox(card)
         # self.countBox.setRange(1, 125)
         # self.countBox.setValue(10)

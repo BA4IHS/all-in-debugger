@@ -88,20 +88,20 @@ class DapPage(QWidget):
         且 border-radius 需等于外框尺寸（width + 2*border）的一半才是标准圆。"""
         border = "#5a5a5a" if isDarkTheme() else "#999999"
         color = themeColor().name()
-        text = "#d8d8d8" if isDarkTheme() else "#1f1f1f"
+        text = "#ffffff" if isDarkTheme() else "#1f1f1f"
         return (
             f"QRadioButton {{ background-color: transparent; color: {text}; }}"
             "QRadioButton::indicator { width: 14px; height: 14px; "
-            f"border-radius: 9px; border: 2px solid {border}; "
+            f"border-radius: 8px; border: 2px solid {border}; "
             "background-color: transparent; }"
             "QRadioButton::indicator:hover, "
             "QRadioButton::indicator:pressed { "
-            f"border-radius: 9px; border: 2px solid {border}; "
+            f"border-radius: 8px; border: 2px solid {border}; "
             "background-color: transparent; }"
             "QRadioButton::indicator:checked, "
             "QRadioButton::indicator:checked:hover, "
             "QRadioButton::indicator:checked:pressed { "
-            f"border-radius: 9px; border: 2px solid {color}; "
+            f"border-radius: 8px; border: 2px solid {color}; "
             f"background-color: {color}; }}"
         )
 
