@@ -259,6 +259,7 @@ class HidPage(QWidget):
         self.tplSendBtn = PrimaryPushButton("批量发送", card)
         self.tplStopBtn = PushButton("停止", card)
         self.tplStopBtn.setEnabled(False)
+        
         self.tplLoopSwitch = SwitchButton(card)
         self.tplLoopSwitch.setOnText("循环")
         self.tplLoopSwitch.setOffText("单次")

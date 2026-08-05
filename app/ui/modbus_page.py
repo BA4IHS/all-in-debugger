@@ -221,7 +221,7 @@ class ModbusPage(QWidget):
         self.addrBox.setRange(0, 65535)
         self.addrBox.setMinimumWidth(128)
         r2.addWidget(self.addrBox, 1)
-        
+
         # 挤掉了换行
         # r2.addWidget(BodyLabel("数量", card))  
         # self.countBox = SpinBox(card)
@@ -247,10 +247,11 @@ class ModbusPage(QWidget):
         self.pollBox.setValue(1000)
         self.pollBox.setSuffix(" ms")
         self.pollBox.setMinimumWidth(90)
+        
         self.pollSwitch = SwitchButton(card)
+        self.pollSwitch.setChecked(True)
         self.pollSwitch.setOnText("开")
         self.pollSwitch.setOffText("关")
-        self.pollSwitch.setChecked(True)
         prow.addWidget(self.pollBox, 1)
         prow.addWidget(self.pollSwitch)
         v.addLayout(prow)
@@ -430,7 +431,8 @@ class ModbusPage(QWidget):
     def _on_poll_toggled(self, on: bool):
         if on:
             if not self._connected:
-                self.pollSwitch.setChecked(False)
+                # 未连接：保留"开"状态但不启动轮询，
+                # 连接成功后由 _on_connected 按开关状态启动
                 return
             self._pollTimer.start(max(100, self.pollBox.value()))
         else:
