@@ -41,10 +41,13 @@ DAP_INFO_PACKET_SIZE = 0xFE
 DAP_PORT_SWD = 1
 DAP_PORT_JTAG = 2
 
-# SWD 请求位（bit0=start, bit1=APnDP, bit2=RnW, bit3-4=A[3:2],
-# bit5=偶校验, bit7=park）
-SWD_REQ_AP = 1 << 1
-SWD_REQ_READ = 1 << 2
+# DAP_Transfer 请求字节位定义（CMSIS-DAP 规范，官方固件 DAP.h 核实）：
+# bit0=APnDP(0=DP,1=AP) bit1=RnW(0=写,1=读) bit2=A2 bit3=A3
+# bit4=ValueMatch bit5=MatchMask bit7=Timestamp。
+# SWD 线帧的 start/偶校验/stop/park 位由调试器固件生成，
+# 主机请求字节绝不能包含（实测：包含会导致 NO_ACK/应答错乱）。
+SWD_REQ_AP = 1 << 0
+SWD_REQ_READ = 1 << 1
 SWD_ACK_OK = 0x01
 SWD_ACK_WAIT = 0x02
 SWD_ACK_FAULT = 0x04
@@ -83,10 +86,6 @@ def load_info() -> str:
     else:
         parts.append(winusb_binding.load_info())
     return "；".join(parts)
-
-
-def _parity(v: int) -> int:
-    return bin(v).count("1") & 1
 
 
 def enum_probes(verify: bool = False) -> List[dict]:
@@ -142,7 +141,8 @@ def _verify_dap_hid(path: bytes) -> bool:
         payload += b"\x00" * (65 - len(payload))  # 报告 ID 0 + 64 字节包
         hid.write(payload)
         data = hid.read(65, timeout_ms=150)
-        return bool(data) and data[1] == DAP_INFO
+        # hidapi 读回不含报告 ID，首字节即命令回显 0x00
+        return bool(data) and data[0] == DAP_INFO
     except Exception:
         return False
     finally:
@@ -266,7 +266,8 @@ class DapProbe:
             payload += b"\x00" * (self.packet_size + 1 - len(payload))
         self._hid.write(payload)
         data = self._hid.read(self.packet_size + 1, timeout_ms=500)
-        return bytes(data[1:]) if data else b""
+        # hidapi 读回已不含报告 ID，首字节即命令回显，整体返回
+        return bytes(data) if data else b""
 
     def _exchange_winusb(self, req: bytes) -> bytes:
         # v2 批量通道无报告 ID 前缀，直接发命令包
@@ -319,8 +320,21 @@ class DapProbe:
             raise DapError("SWJ 序列执行失败")
 
     def line_reset(self):
-        """SWD 线复位：50+ 个 1 + 空闲。"""
+        """SWD 线复位：50+ 个 1。"""
         self.swj_sequence(b"\xFF" * 8, 64)
+
+    def swd_activate(self):
+        """完整 SWD 激活序列（实测必需，仅线复位会得到 NO_ACK）。
+
+        1) 64 个 1 线复位；
+        2) 16 位 JTAG→SWD 选择码 0xE79E（LSB 先发，字节序 0x9E 0xE7）；
+        3) 再次 64 个 1 线复位；
+        4) 8 个 0 空闲周期。
+        """
+        self.swj_sequence(b"\xFF" * 8, 64)
+        self.swj_sequence(b"\x9E\xE7", 16)
+        self.swj_sequence(b"\xFF" * 8, 64)
+        self.swj_sequence(b"\x00", 8)
 
     def swj_pins(self, value: int, select: int, wait_us: int = 1000):
         req = bytes([DAP_SWJ_PINS, value & 0xFF, select & 0xFF]) \
@@ -343,7 +357,8 @@ class DapProbe:
                  ) -> Tuple[int, int, List[int]]:
         """DAP_Transfer：reqs = [(request_byte, write_value|None), ...]。
 
-        返回 (response, count, read_values)。
+        响应包格式（CMSIS-DAP 规范）：[0x05, Count, Response(ACK), 读数据...]。
+        返回 (ack, count, read_values)。
         """
         body = bytearray([DAP_TRANSFER, dap_index & 0xFF, len(reqs)])
         for req, val in reqs:
@@ -353,14 +368,15 @@ class DapProbe:
         rsp = self.exchange(bytes(body))
         if not rsp or rsp[0] != DAP_TRANSFER:
             raise DapError("DAP_Transfer 无响应")
-        count = rsp[2]
+        count = rsp[1]
+        ack = rsp[2] & 0x07
         values = []
         off = 3
         for req, val in reqs:
             if val is None and off + 4 <= len(rsp):
                 values.append(int.from_bytes(rsp[off:off + 4], "little"))
                 off += 4
-        return rsp[1], count, values
+        return ack, count, values
 
     def transfer_block_write(self, dap_index: int, request: int,
                              values: List[int]) -> int:
@@ -372,7 +388,8 @@ class DapProbe:
         rsp = self.exchange(bytes(body))
         if not rsp or rsp[0] != DAP_TRANSFER_BLOCK:
             raise DapError("DAP_TransferBlock 无响应")
-        return rsp[1]  # ACK
+        # 响应格式：[0x06, Count低, Count高, Response(ACK)]
+        return rsp[3] if len(rsp) >= 4 else -1
 
 
 class SwdTarget:
@@ -386,49 +403,50 @@ class SwdTarget:
     # ── 底层 SWD 读写 ──────────────────────────────────────────
 
     def _swd_req(self, ap: bool, read: bool, addr: int) -> int:
-        """构造 SWD 请求字节（寄存器字地址只取 A[3:2]，偶校验）。"""
-        req = 0x81  # start + park
+        """构造 DAP_Transfer 请求字节（CMSIS-DAP 协议格式）。
+
+        bit0=APnDP bit1=RnW bit2=A2 bit3=A3（寄存器字地址取 A[3:2]）。
+        线帧 start/校验/park 由调试器固件生成，此处不参与。
+        """
+        req = ((addr >> 2) & 0x3) << 2
         if ap:
             req |= SWD_REQ_AP
         if read:
             req |= SWD_REQ_READ
-        req |= ((addr >> 2) & 0x3) << 3
-        p = _parity(((addr >> 2) & 0x3)
-                    | (SWD_REQ_AP if ap else 0)
-                    | (SWD_REQ_READ if read else 0))
-        req |= p << 5
         return req
 
     def dp_read(self, addr: int) -> int:
-        _, count, vals = self.probe.transfer(
+        # DP 读在同一次 transfer 内直接返回数据（与 AP 读的流水线不同，
+        # diag6 实测：IDCODE 读请求的数据字即为 IDCODE，RDBUFF 返回 0）。
+        ack, count, vals = self.probe.transfer(
             self.dap_index, [(self._swd_req(False, True, addr), None)])
-        if count < 1:
-            raise DapError(f"DP 读 {addr:#x} 失败")
+        if ack != SWD_ACK_OK or count < 1 or not vals:
+            raise DapError(f"DP 读 {addr:#x} 失败（ACK={ack:#x}）")
         return vals[0]
 
     def dp_write(self, addr: int, value: int):
-        resp, count, _ = self.probe.transfer(
+        ack, count, _ = self.probe.transfer(
             self.dap_index, [(self._swd_req(False, False, addr), value)])
-        if resp != SWD_ACK_OK or count < 1:
-            raise DapError(f"DP 写 {addr:#x} ACK={resp:#x}")
+        if ack != SWD_ACK_OK or count < 1:
+            raise DapError(f"DP 写 {addr:#x} ACK={ack:#x}")
 
     def ap_read(self, addr: int, ap_sel: int = 0) -> int:
         self._set_ap(ap_sel)
         # AP 读需要两次 transfer：第一次启动，第二次取 RDBUFF
         _, _, _ = self.probe.transfer(
             self.dap_index, [(self._swd_req(True, True, addr), None)])
-        _, count, vals = self.probe.transfer(
+        ack, count, vals = self.probe.transfer(
             self.dap_index, [(self._swd_req(False, True, 0x0C), None)])
-        if count < 1:
-            raise DapError(f"AP 读 {addr:#x} 失败")
+        if ack != SWD_ACK_OK or count < 1 or not vals:
+            raise DapError(f"AP 读 {addr:#x} 失败（ACK={ack:#x}）")
         return vals[0]
 
     def ap_write(self, addr: int, value: int, ap_sel: int = 0):
         self._set_ap(ap_sel)
-        resp, count, _ = self.probe.transfer(
+        ack, count, _ = self.probe.transfer(
             self.dap_index, [(self._swd_req(True, False, addr), value)])
-        if resp != SWD_ACK_OK or count < 1:
-            raise DapError(f"AP 写 {addr:#x} ACK={resp:#x}")
+        if ack != SWD_ACK_OK or count < 1:
+            raise DapError(f"AP 写 {addr:#x} ACK={ack:#x}")
 
     def _set_ap(self, ap_sel: int):
         want = (ap_sel << 24)
@@ -497,6 +515,8 @@ class SwdTarget:
         self.ap_write(_AP_CSW, _CSW_32BIT, ap_sel)
 
     def read_idcode(self) -> int:
-        self.probe.line_reset()
-        self.dp_read(_DP_CTRL_STAT)  # 清 RDBUFF
+        # diag6 实测：完整激活后直接读 IDCODE(0x00) 即可。
+        # 激活后读 CTRL/STAT=0x40 即 READOK 置位（bit6），DP 状态健康；
+        # 实测激活后立即写 ABORT 反而导致后续读 NO_ACK，故不做。
+        self.probe.swd_activate()
         return self.dp_read(0x00)
