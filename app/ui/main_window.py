@@ -52,6 +52,10 @@ class MainWindow(SplitFluentWindow):
         super().__init__()
         self.setWindowTitle("all-in-debugger")
         self.resize(1220, 780)
+        # 显式下限覆盖布局自动传播的最小尺寸：Qt 会取所有子页面
+        # minimumSizeHint 的最大值作为窗口最小尺寸（实测 932×534），
+        # 导致窗口只能调大无法调小；此处显式设小后即可自由缩放。
+        self.setMinimumSize(700, 480)
 
         # 串口工作线程（唯一持有 serial.Serial）
         self.st = SerialThread(self)

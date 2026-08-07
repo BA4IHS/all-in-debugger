@@ -8,7 +8,7 @@
 
 产物：
     dist/main.dist/                      standalone 目录（可直接运行）
-    dist/all-in-debugger-<版本>.7z      压缩归档（无 7z 时回退 .zip）
+    dist/all-in-debugger-x64-<版本>.7z  压缩归档（无 7z 时回退 .zip）
 
 安全与体积：
     - config.json / data.json 绝不打包（含 MCP 密钥）：Nuitka 只打包
@@ -35,7 +35,8 @@ VERSION = "1.2.0"
 # 输出目录名 = 入口模块名 + ".dist"（与既有 dist/main.dist 结构一致）
 DIST_DIR = ROOT / "dist"
 BUNDLE_DIR = DIST_DIR / "main.dist"
-ARCHIVE_BASE = DIST_DIR / f"all-in-debugger-{VERSION}"
+# 归档文件名带架构标识（x64），与发布包命名约定一致
+ARCHIVE_BASE = DIST_DIR / f"all-in-debugger-x64-{VERSION}"
 
 
 def build_args() -> list:
@@ -64,6 +65,10 @@ def build_args() -> list:
         "--include-data-files=app/hid_templates.json=app/hid_templates.json",
         # ---- 排除项 ----
         "--nofollow-import-to=tests",
+        # qfluentwidgets/common/image_utils.py 的 Acrylic 窗口/主色提取功能
+        # （numpy/scipy/PIL/colorthief 幽灵依赖）：应用从未使用，运行时 try/except
+        # 自动降级，与现状行为一致，省 ~117.6MB。已核实库内仅此一处引用。
+        "--nofollow-import-to=numpy,scipy,PIL,colorthief",
         # ---- Windows 形态与版本信息 ----
         "--windows-console-mode=disable",   # GUI 程序，不弹控制台（编译后另有 PE 子系统校验）
         # ---- 体积优化（Nuitka 4.1.3 参数已核实）----
@@ -127,6 +132,32 @@ def prune_qt_plugins():
     print(f"[build] Qt 插件裁剪完成，共移除 {removed} 个文件")
 
 
+# qt6pdf.dll（4.4MB）与 qt6network.dll（1.7MB）为死重：
+# pefile 扫描全部 dll/pyd 及 exe 导入表，qt6pdf 无任何引用者，
+# qt6network 亦无引用者（qfluentwidgets 仅用 Core/Gui/Widgets/Svg/Xml）。
+# 需在编译后手动删除（Nuitka 无法按单 DLL 裁剪 Qt 库）。
+PRUNE_QT_DLLS = [
+    "qt6pdf.dll",
+    "qt6network.dll",
+]
+
+
+def prune_qt_dlls():
+    """删除无引用者的 Qt 库 DLL（qt6pdf/qt6network），缩小体积。"""
+    removed = 0
+    for name in PRUNE_QT_DLLS:
+        p = BUNDLE_DIR / name
+        if p.is_file():
+            kb = p.stat().st_size // 1024
+            p.unlink()
+            removed += 1
+            print(f"[build] 裁剪 Qt 库：{name} ({kb} KB)")
+    if removed:
+        print(f"[build] Qt 库裁剪完成，共移除 {removed} 个文件")
+    else:
+        print("[build] Qt 库裁剪：未找到目标文件（可能已在依赖分析中排除）")
+
+
 def check_no_config_leak():
     """防御检查：确认 config.json/data.json（含 MCP 密钥）未进入产物。"""
     leaked = []
@@ -141,6 +172,35 @@ def check_no_config_leak():
             p.unlink()
         return
     print("[build] 配置检查：产物中无 config.json/data.json（MCP 密钥不打包）✓")
+
+
+# HID/ADB 运行必需的原生文件（app/libs 由 --include-data-dir 递归复制）。
+# 若缺失，HID 页无法加载 hidapi.dll、ADB 页无法调用 adb.exe。
+REQUIRED_LIBS = [
+    "libs/hidapi.dll",
+    "libs/README.txt",
+    "libs/adb/adb.exe",
+    "libs/adb/AdbWinApi.dll",
+    "libs/adb/AdbWinUsbApi.dll",
+]
+
+
+def check_libs_complete():
+    """防御检查：确认 HID/ADB 原生依赖已进入产物（缺失会静默失败，必须显式暴露）。"""
+    missing = []
+    for rel in REQUIRED_LIBS:
+        p = BUNDLE_DIR / "app" / rel
+        if not p.is_file():
+            missing.append(rel)
+    if missing:
+        print("[build] 警告：产物中缺少 HID/ADB 原生依赖！", file=sys.stderr)
+        for rel in missing:
+            print(f"[build]   缺失：app\\{rel}", file=sys.stderr)
+        print("[build] 请检查 app/libs 目录完整性后重新打包（HID/ADB 功能将不可用）",
+              file=sys.stderr)
+        return False
+    print(f"[build] 依赖检查：HID/ADB 原生依赖齐全（{len(REQUIRED_LIBS)} 项）✓")
+    return True
 
 
 def check_gui_subsystem():
@@ -200,11 +260,15 @@ def main():
     subprocess.run(build_args(), check=True)
     print(f"[build] 编译完成：{BUNDLE_DIR}")
 
-    # 编译后处理：裁剪体积 → 密钥安全 → 无终端确认
+    # 编译后处理：裁剪体积 → 密钥安全 → 无终端确认 → HID/ADB 依赖完整
     prune_qt_plugins()
+    prune_qt_dlls()
     check_no_config_leak()
     if not check_gui_subsystem():
         print("[build] 警告：exe 存在控制台窗口风险，请检查 --windows-console-mode",
+              file=sys.stderr)
+    if not check_libs_complete():
+        print("[build] 警告：产物缺少 HID/ADB 原生依赖，归档将不完整！",
               file=sys.stderr)
 
     if "--no-archive" not in sys.argv:
