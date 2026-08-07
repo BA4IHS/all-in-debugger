@@ -31,7 +31,7 @@
 
 你是否厌倦了开许多窗口来调试你的板子——串口一个工具、ADB 一个工具、HID 一个工具、SSH 再开一个终端……窗口越开越多，来回切换苦不堪言。**这款工具就是为解决这个问题而生的**：把常用调试协议全部收进一个 Fluent 风格界面，侧栏一键切换。
 
-本人非计算机专业，本项目全程使用 AI 辅助编程完成。最初由 **MXL8876** 提出想法，在一次次"发现问题 → AI 修复 → 实测验证"的迭代中成长为今天的样子。如果你也想要一个"All in One"的调试台，欢迎 Star、试用和提 Issue。
+本人非计算机专业，本项目使用 AI 辅助编程完成。在一次次"发现问题 → AI 修复 → 实测验证"的迭代中成长为今天的样子（3A大作）。如果你也想要一个"All in One"的调试台，欢迎 Star、试用和提 Issue。
 
 ## 目录
 
@@ -134,9 +134,9 @@ build.bat --no-archive    :: 只编译，不压缩
 
 打包注意事项：
 
-- 需要 C 编译器：MSVC（VS Build Tools）或 MinGW64；未检测到时会自动下载 MinGW64
+- 需要 C 编译器：MSVC（VS Build Tools）或 MinGW64
 - `app/libs/`（hidapi.dll + 官方 adb 三件套）与 `app/assets/`、`app/adb_profiles/`、`app/hid_templates.json` 会自动随包携带（frozen 模式路径定位已内置）
-- **`config.json` / `data.json` 绝不打包**（含 MCP 密钥，只打包 `--include-data-*` 指定的文件；编译后脚本另有防御检查兜底），首次启动在 exe 旁自动生成
+- **`config.json` / `data.json` 不打包**（含 MCP 密钥，只打包 `--include-data-*` 指定的文件；编译后脚本另有防御检查兜底），首次启动在 exe 旁自动生成
 - **无终端模式**：`--windows-console-mode=disable` 不弹控制台；编译后自动校验 exe 的 PE 子系统为 `WINDOWS_GUI`（Subsystem=2），确认无终端
 - **体积优化**：`--lto=yes` 链接期优化 + 排除 Qt tls 插件与翻译 + 裁剪无用图片格式插件（qgif/qicns/qpdf/qtga/qtiff/qwbmp/qwebp），Qt 插件目录约 3.9MB → 1.9MB
 
@@ -209,9 +209,11 @@ all-in-debugger/
 
 ## 作者
 
-**MXL8876** 提出最初想法，BA4IHS 借助 AI 编程实现与维护。
+BA4IHS 借助 AI 编程实现与维护。 
+**MXL8876** 提供硬件辅助测试，软件测试。
 
 GitHub: [BA4IHS](https://github.com/BA4IHS)
+
 
 *您也可以在贡献者名单中参看所有参与该项目的开发者。*
 
@@ -235,7 +237,6 @@ GitHub: [BA4IHS](https://github.com/BA4IHS)
 
 ## 鸣谢
 
-- [Best_README_template](https://github.com/shaojintian/Best_README_template) — 本 README 模板来源
 - [Img Shields](https://shields.io) — 徽章生成
 - [SEGGER RTT](https://www.segger.com/products/debug-probes/j-link/technology/about-real-time-transfer/) — RTT 协议参考
 - [CMSIS-DAP](https://arm-software.github.io/CMSIS_5/DAP/html/index.html) — DAP 协议规范
