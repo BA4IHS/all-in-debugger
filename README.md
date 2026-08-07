@@ -130,7 +130,7 @@ build.bat --no-archive    :: 只编译，不压缩
 产物说明：
 
 - `dist/main.dist/` — 免 Python 运行目录，直接双击 `all-in-debugger.exe`
-- `dist/all-in-debugger-1.0.0.7z` — 发布归档（机器无 7-Zip 时自动回退 `.zip`）
+- `dist/all-in-debugger-1.2.0.7z` — 发布归档（机器无 7-Zip 时自动回退 `.zip`）
 
 打包注意事项：
 

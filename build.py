@@ -30,7 +30,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 ENTRY = ROOT / "main.py"
-VERSION = "1.0.0"
+VERSION = "1.2.0"
 
 # 输出目录名 = 入口模块名 + ".dist"（与既有 dist/main.dist 结构一致）
 DIST_DIR = ROOT / "dist"
