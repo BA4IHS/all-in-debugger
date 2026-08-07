@@ -74,7 +74,7 @@ def loadConfig() -> None:
 
 
 def _ensureMcpToken() -> None:
-    """首次启动时自动生成 MCP 密钥；已有密钥绝不覆盖/删除。"""
+    """首次启动时自动生成 MCP 密钥；已有密钥不覆盖/删除。"""
     if qconfig.get(cfg.mcpToken):
         return
     qconfig.set(cfg.mcpToken, uuid.uuid4().hex[:16])

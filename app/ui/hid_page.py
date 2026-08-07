@@ -286,9 +286,12 @@ class HidPage(QWidget):
         self.hexSendSwitch.setChecked(True)
         bar.addWidget(self.hexSendSwitch)
         self.autoRidCheck = CheckBox("自动补报告 ID 0x00", card)
-        self.autoRidCheck.setChecked(True)
+        # 默认不补：带编号报告的设备（报告 ID 非 0）补 0x00 反而触发
+        # WriteFile 0x57 参数错误；写入失败时底层会自动换形式重试
+        self.autoRidCheck.setChecked(False)
         self.autoRidCheck.setToolTip(
-            "Windows HID 写入要求首字节为报告 ID；设备不使用报告 ID 时补 0x00")
+            "仅用于「设备不使用报告 ID」的场景：发送数据前补 0x00 首字节。"
+            "带编号报告的设备请关闭；写入失败会自动用另一种形式重试")
         bar.addWidget(self.autoRidCheck)
         self.countLabel = CaptionLabel("RX: 0 B  TX: 0 B", card)
         bar.addWidget(self.countLabel)
@@ -410,10 +413,16 @@ class HidPage(QWidget):
 
     def _on_opened(self, info: dict):
         self._set_opened(True)
+        rep = info.get("report_lengths") or {}
+        rep_txt = ""
+        if rep:
+            rep_txt = (f"\n报告长度(含ID)：OUT={rep.get('output', 0)} "
+                       f"IN={rep.get('input', 0)} FEAT={rep.get('feature', 0)}")
         self.infoLabel.setText(
             f"{info.get('product') or 'HID 设备'}\n"
             f"VID:PID = {info['vid']:04X}:{info['pid']:04X}"
-            + (f"\nSN: {info['serial']}" if info.get("serial") else ""))
+            + (f"\nSN: {info['serial']}" if info.get('serial') else "")
+            + rep_txt)
         InfoBar.success(title="设备已打开", content="", duration=2000, parent=self)
 
     def _on_open_failed(self, msg: str):
@@ -433,6 +442,12 @@ class HidPage(QWidget):
 
     # ── 单包发送 ───────────────────────────────────────────────
 
+    def _apply_rid(self, data: bytes) -> bytes:
+        """按「自动补报告 ID」开关处理首字节；单包/模板发送共用。"""
+        if data and self.autoRidCheck.isChecked() and data[0] != 0x00:
+            return b"\x00" + data
+        return data
+
     def _build_payload(self):
         """解析发送框；返回 bytes 或 None（已提示）。"""
         text = self.sendEdit.text()
@@ -446,9 +461,7 @@ class HidPage(QWidget):
             data = text.encode("utf-8")
         if not data:
             return None
-        if self.autoRidCheck.isChecked() and data[0] != 0x00:
-            data = b"\x00" + data
-        return data
+        return self._apply_rid(data)
 
     def _on_send(self):
         if not self.ht.worker.opened:
@@ -565,13 +578,13 @@ class HidPage(QWidget):
         self.tplStopBtn.setEnabled(True)
         self._tpl_tick(first=True)
 
-    @staticmethod
-    def _build_seq(rows):
+    def _build_seq(self, rows):
         seq = []
         for r in rows:
             data, _err = su.parse_hex_input(r["data"])
             if data is None:
                 continue
+            data = self._apply_rid(data)
             for _ in range(int(r["repeat"])):
                 seq.append((data, int(r["delay"])))
         return seq

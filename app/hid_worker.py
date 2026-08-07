@@ -54,6 +54,10 @@ class HidWorker(QObject):
                 self._dev.open(int(cfg.get("vid", 0)), int(cfg.get("pid", 0)),
                                str(cfg.get("serial", "")))
             info = self._dev.get_strings()
+            try:
+                rep_len = self._dev.report_lengths()
+            except NativeError:
+                rep_len = {}
         except (NativeError, OSError, ValueError) as e:
             self.openFailed.emit(str(e))
             return
@@ -65,6 +69,7 @@ class HidWorker(QObject):
             "product": cfg.get("product", "") or info.get("product", ""),
             "manufacturer": info.get("manufacturer", ""),
             "serial": info.get("serial", "") or str(cfg.get("serial", "")),
+            "report_lengths": rep_len,
         }
         self.deviceOpened.emit(dict(self._info))
 

@@ -41,4 +41,4 @@ python -m pytest tests/ -q
 - 编码 UTF-8，注释/文档中文。
 - UI 用 qfluentwidgets，Fluent 深色主题（`console_style.py` / `scrollbar_style.py` 做主题适配）。
 - 串口原始数据保存为 `.bin` 日志，位于 `config.json` 的 `logDir`。
-- 无 Nuitka/打包脚本（曾移除），`dist/` 是旧产物，别依赖。
+- 打包脚本 `build.py`（Nuitka standalone + 7z，入口 `build.bat`，见 README「打包发布」）；`dist/` 下旧文件是历史产物，以新打包为准。

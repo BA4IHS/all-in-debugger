@@ -69,6 +69,10 @@ def _load():
     dll.hid_read_timeout.argtypes = [c_void_p, POINTER(c_ubyte), c_size_t, c_int]
     dll.hid_set_nonblocking.restype = c_int
     dll.hid_set_nonblocking.argtypes = [c_void_p, c_int]
+    if hasattr(dll, "hid_report_length"):
+        # hidapi >= 0.14：查询设备声明的报告长度（含报告 ID 字节）
+        dll.hid_report_length.restype = c_int
+        dll.hid_report_length.argtypes = [c_void_p, c_int, c_ubyte]
     dll.hid_send_feature_report.restype = c_int
     dll.hid_send_feature_report.argtypes = [c_void_p, POINTER(c_ubyte), c_size_t]
     dll.hid_get_feature_report.restype = c_int
@@ -164,14 +168,44 @@ class HidDevice:
     # ── 数据传输 ───────────────────────────────────────────────
 
     def write(self, data: bytes) -> int:
-        """写输出报告；返回实际写入字节数。data 首字节应为报告 ID(无则 0x00)。"""
+        """写输出报告；返回实际写入字节数。data 首字节应为报告 ID(无则 0x00)。
+
+        Windows 的 WriteFile 把首字节当报告 ID 校验：ID 与设备报告描述符
+        不符（或长度超声明值）即报 0x57 参数错误。此处失败时自动用另一
+        种报告 ID 形式重试一次（首字节为 0 则去掉、非 0 则补 0），让
+        带编号/不带编号报告的设备都能写成功。
+        """
         self._require_open()
         dll = _load()
-        buf = (c_ubyte * len(data)).from_buffer_copy(bytes(data))
+        data = bytes(data)
+        try:
+            return self._raw_write(dll, data)
+        except native.NativeError:
+            alt = data[1:] if data[:1] == b"\x00" else b"\x00" + data
+            if alt and alt != data:
+                return self._raw_write(dll, alt)
+            raise
+
+    def _raw_write(self, dll, data: bytes) -> int:
+        buf = (c_ubyte * len(data)).from_buffer_copy(data)
         n = dll.hid_write(self._handle, buf, len(data))
         if n < 0:
             raise native.NativeError(self._err(self._handle, "HID 写入失败"))
         return n
+
+    def report_lengths(self) -> dict:
+        """设备声明的报告长度（含报告 ID 字节）；DLL 不支持时返回 {}。"""
+        self._require_open()
+        dll = _load()
+        if dll is None or not hasattr(dll, "hid_report_length"):
+            return {}
+        out = {}
+        for key, rtype in (("input", 0), ("output", 1), ("feature", 2)):
+            try:
+                out[key] = int(dll.hid_report_length(self._handle, rtype, 0))
+            except Exception:
+                out[key] = 0
+        return out
 
     def read(self, size: int = 512, timeout_ms: int = 100) -> bytes:
         """读输入报告；超时返回 b''。"""

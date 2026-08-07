@@ -1,12 +1,16 @@
 # coding: utf-8
 """CMSIS-DAP 协议 + SWD 传输（RTT 调试核心）。
 
-接入方式：通过 hidapi.dll 直连 DAP 调试器的 USB HID 接口（CMSIS-DAP v1）。
+接入方式（双传输，命令集相同）：
+- CMSIS-DAP v1：hidapi.dll 直连调试器 USB HID 接口（报告 ID 0 + 命令包）
+- CMSIS-DAP v2：winusb.dll 直连调试器 WinUSB 厂商接口（bulk IN/OUT，
+  无报告 ID 前缀）。部分 v2 固件（如某些 DAPLink 改版）的 HID v1 端点
+  不响应命令，只能走 WinUSB 通道。
 不依赖任何调试厂商 DLL（Keil CMSIS_DAP.dll 是 32 位私有插件，无公开接口，
 无法在 Python 中使用）。
 
 分层：
-- DapProbe：HID 打开 + CMSIS-DAP 命令封装（connect/transfer/reset 等）
+- DapProbe：HID/WinUSB 打开 + CMSIS-DAP 命令封装（connect/transfer/reset 等）
 - SwdTarget：基于 DAP_Transfer 的 SWD 端口读写（DP/AP 寄存器、内存访问）
 """
 import time
@@ -14,6 +18,7 @@ from typing import List, Optional, Tuple
 
 from app import native
 from app import hid_binding
+from app import winusb_binding
 
 # ── CMSIS-DAP 命令 ID ────────────────────────────────────────────
 
@@ -32,8 +37,9 @@ DAP_SWD_CONFIGURE = 0x13
 DAP_INFO_PACKET_SIZE = 0xFE
 
 # DAP_Connect 端口
-DAP_PORT_SWD = 2
-DAP_PORT_JTAG = 1
+# CMSIS-DAP 规范（官方固件 DAP.h）：0=自动/禁用，1=SWD，2=JTAG
+DAP_PORT_SWD = 1
+DAP_PORT_JTAG = 2
 
 # SWD 请求位（bit0=start, bit1=APnDP, bit2=RnW, bit3-4=A[3:2],
 # bit5=偶校验, bit7=park）
@@ -62,14 +68,21 @@ class DapError(native.NativeError):
 
 
 def available() -> bool:
-    """DAP 直连依赖 hidapi.dll。"""
-    return hid_binding.available()
+    """DAP 直连依赖 hidapi.dll（v1）或系统 winusb.dll（v2），任一可用即可。"""
+    return hid_binding.available() or winusb_binding.available()
 
 
 def load_info() -> str:
+    parts = []
     if hid_binding.available():
-        return "hidapi.dll 已加载（DAP 调试器经 USB HID 直连，无需厂商 DLL）"
-    return hid_binding.load_info()
+        parts.append("hidapi.dll 已加载（CMSIS-DAP v1 HID 直连）")
+    else:
+        parts.append(hid_binding.load_info())
+    if winusb_binding.available():
+        parts.append("winusb.dll 已加载（CMSIS-DAP v2 批量直连）")
+    else:
+        parts.append(winusb_binding.load_info())
+    return "；".join(parts)
 
 
 def _parity(v: int) -> int:
@@ -77,29 +90,51 @@ def _parity(v: int) -> int:
 
 
 def enum_probes(verify: bool = False) -> List[dict]:
-    """通过 HID 枚举 CMSIS-DAP 调试器候选（usage_page=0xFF00 + usage=0x0001
-    或产品名含 cmsis-dap）。
+    """枚举 CMSIS-DAP 调试器候选（v1 HID + v2 WinUSB 双通道）。
+
+    v1：HID 枚举 usage_page=0xFF00 + usage=0x0001 或产品名含 cmsis-dap。
+    v2：WinUSB 接口无描述符级过滤手段（实测 DeviceDesc/FriendlyName 接口
+    属性不存在），只能逐个打开后发 DAP_Info 在线验证；verify=False 时按
+    产品名含 cmsis-dap 粗筛（路径中无法取产品名，故保守全部列出并标记）。
 
     verify=True 时逐个候选发 DAP_Info 在线验证：触摸屏等 vendor HID
     会冒充 0xFF00/0x0001，仅凭枚举字段无法区分（打开失败/无 DAP 响应即排除）。
+
+    返回字典统一字段：path/vid/pid/product/transport（"hid"|"winusb"）。
     """
+    out = []
+    # ── v1：HID ──
     try:
         devs = hid_binding.enumerate_devices()
     except Exception:
         devs = []
-    out = []
     for d in devs:
         prod = (d.get("product") or "").lower()
         # CMSIS-DAP v1 惯例：厂商页 0xFF00 + usage 0x0001
         if ((d.get("usage_page") == 0xFF00 and d.get("usage") == 0x0001)
                 or "cmsis-dap" in prod or "cmsis_dap" in prod):
-            if not verify or _verify_dap(d["path"]):
-                out.append(d)
+            if not verify or _verify_dap_hid(d["path"]):
+                item = dict(d)
+                item["transport"] = "hid"
+                out.append(item)
+    # ── v2：WinUSB ──
+    for path in winusb_binding.enumerate_interfaces():
+        vid, pid = winusb_binding.parse_vid_pid(path)
+        if verify:
+            if not _verify_dap_winusb(path):
+                continue
+        item = {
+            "path": path,  # str 类型，与 HID 的 bytes path 区分
+            "vid": vid, "pid": pid,
+            "product": "CMSIS-DAP v2",
+            "transport": "winusb",
+        }
+        out.append(item)
     return out
 
 
-def _verify_dap(path: bytes) -> bool:
-    """打开候选设备发 DAP_Info，仅当收到合法 DAP 响应才认定为调试器。"""
+def _verify_dap_hid(path: bytes) -> bool:
+    """打开候选 HID 设备发 DAP_Info，仅当收到合法 DAP 响应才认定为调试器。"""
     hid = hid_binding.HidDevice()
     try:
         hid.open_path(path)
@@ -114,53 +149,132 @@ def _verify_dap(path: bytes) -> bool:
         hid.close()
 
 
+def _verify_dap_winusb(path: str) -> bool:
+    """打开候选 WinUSB 接口发 DAP_Info，验证是否为 CMSIS-DAP v2 调试器。
+
+    WinUSB 接口无法在枚举阶段区分调试器与其他 WinUSB 设备，必须在线验证。
+    """
+    dev = winusb_binding.WinUsbDevice()
+    try:
+        dev.open_path(path, timeout_ms=150)
+        req = bytes([DAP_INFO, 0x00])
+        req += b"\x00" * (64 - len(req))
+        dev.write(req)
+        data = dev.read(64)
+        return bool(data) and data[0] == DAP_INFO
+    except Exception:
+        return False
+    finally:
+        dev.close()
+
+
 class DapProbe:
-    """一个 CMSIS-DAP 调试器（USB HID 直连，CMSIS-DAP v1）。"""
+    """一个 CMSIS-DAP 调试器（v1 HID 或 v2 WinUSB，命令集相同）。
+
+    传输由 path 类型区分：bytes → HID（v1），str → WinUSB（v2）。
+    """
 
     def __init__(self):
         self._hid: Optional[hid_binding.HidDevice] = None
-        self.packet_size = 64   # HID 报告默认 64，连接后按 DAP_Info 更新
+        self._winusb: Optional[winusb_binding.WinUsbDevice] = None
+        self.packet_size = 64   # 默认 64，打开后按 DAP_Info(0xFE) 更新
         self.path = b""
+        self.transport = "hid"  # "hid" | "winusb"
 
     @property
     def opened(self) -> bool:
-        return self._hid is not None and self._hid.opened
+        return ((self._hid is not None and self._hid.opened)
+                or (self._winusb is not None and self._winusb.opened))
 
-    def open(self, path: bytes = b"") -> None:
-        """path 为空时打开第一个探测到的调试器。"""
+    def open(self, path=b"") -> None:
+        """path 为空时打开第一个探测到的调试器。
+
+        path 类型决定传输：bytes → HID v1，str → WinUSB v2。
+        """
         probes = enum_probes()
+        if not path and any(p.get("transport") == "winusb" for p in probes):
+            # WinUSB 接口在枚举阶段无法区分调试器与其他 WinUSB 设备，
+            # 自动选择时必须在线验证，避免打开非调试器设备
+            probes = enum_probes(verify=True)
         if not probes:
             raise DapError("未找到 CMSIS-DAP 调试器（请确认已插入并安装驱动）")
         target = None
         if path:
-            target = next((p for p in probes if p["path"] == path), None)
+            # HID path 为 bytes、WinUSB path 为 str；MCP 链路统一传 str，
+            # 需兼容两种形式的比较
+            target = next(
+                (p for p in probes
+                 if p["path"] == path
+                 or (isinstance(path, str) and isinstance(p["path"], bytes)
+                     and p["path"].decode("utf-8", "replace") == path)),
+                None)
         if target is None:
             target = probes[0]
-        hid = hid_binding.HidDevice()
-        try:
-            hid.open_path(target["path"])
-        except native.NativeError as e:
-            raise DapError(f"打开调试器失败：{e}")
-        self._hid = hid
+        if target.get("transport") == "winusb":
+            self._open_winusb(target["path"])
+        else:
+            self._open_hid(target["path"])
         self.path = target["path"]
         self._query_packet_size()
 
+    def _open_hid(self, path: bytes) -> None:
+        hid = hid_binding.HidDevice()
+        try:
+            hid.open_path(path)
+        except native.NativeError as e:
+            raise DapError(f"打开调试器失败：{e}")
+        self._hid = hid
+        self.transport = "hid"
+
+    def _open_winusb(self, path: str) -> None:
+        dev = winusb_binding.WinUsbDevice()
+        try:
+            dev.open_path(path, timeout_ms=500)
+        except native.NativeError as e:
+            raise DapError(f"打开调试器失败：{e}")
+        self._winusb = dev
+        self.transport = "winusb"
+
     def close(self) -> None:
+        # 关闭前通知固件断开端口，清理连接状态；
+        # 未读响应残留由下次打开时的 drain 处理
+        if self.opened:
+            try:
+                self.disconnect()
+            except DapError:
+                pass
         if self._hid is not None:
             self._hid.close()
             self._hid = None
+        if self._winusb is not None:
+            self._winusb.close()
+            self._winusb = None
 
     # ── 包收发 ─────────────────────────────────────────────────
 
     def exchange(self, req: bytes) -> bytes:
-        if self._hid is None or not self._hid.opened:
-            raise DapError("调试器未打开")
+        """发一个 CMSIS-DAP 命令包并收响应（不含报告 ID）。"""
+        if self._winusb is not None and self._winusb.opened:
+            return self._exchange_winusb(req)
+        if self._hid is not None and self._hid.opened:
+            return self._exchange_hid(req)
+        raise DapError("调试器未打开")
+
+    def _exchange_hid(self, req: bytes) -> bytes:
         payload = b"\x00" + req
         if len(payload) < self.packet_size + 1:
             payload += b"\x00" * (self.packet_size + 1 - len(payload))
         self._hid.write(payload)
         data = self._hid.read(self.packet_size + 1, timeout_ms=500)
         return bytes(data[1:]) if data else b""
+
+    def _exchange_winusb(self, req: bytes) -> bytes:
+        # v2 批量通道无报告 ID 前缀，直接发命令包
+        payload = bytes(req)
+        if len(payload) < self.packet_size:
+            payload += b"\x00" * (self.packet_size - len(payload))
+        self._winusb.write(payload)
+        return self._winusb.read(self.packet_size)
 
     def _query_packet_size(self):
         try:
@@ -176,8 +290,13 @@ class DapProbe:
 
     def connect(self, port: int = DAP_PORT_SWD) -> int:
         rsp = self.exchange(bytes([DAP_CONNECT, port]))
-        if not rsp or rsp[0] != DAP_CONNECT or rsp[1] == 0:
-            raise DapError("DAP_Connect 失败（检查接线/供电）")
+        if not rsp or rsp[0] != DAP_CONNECT:
+            raise DapError("DAP_Connect 无响应（调试器未应答，"
+                           "检查驱动/固件或换 USB 口重试）")
+        if rsp[1] == 0:
+            # 传输层正常但端口未建立：目标芯片未接/未上电
+            raise DapError("DAP_Connect 失败：调试器正常但未检测到目标芯片"
+                           "（检查 SWD 接线/芯片供电）")
         return rsp[1]
 
     def disconnect(self):

@@ -325,8 +325,10 @@ class DapPage(QWidget):
             return
         self.probeCombo.clear()
         for p in self._probes:
+            tag = "v2" if p.get("transport") == "winusb" else "v1"
             self.probeCombo.addItem(
-                f"{p['vid']:04X}:{p['pid']:04X}  {p.get('product') or 'CMSIS-DAP'}")
+                f"{p['vid']:04X}:{p['pid']:04X}  "
+                f"{p.get('product') or 'CMSIS-DAP'}  [{tag}]")
         if notify:
             InfoBar.success(title="枚举完成",
                             content=f"发现 {len(self._probes)} 个调试器",
