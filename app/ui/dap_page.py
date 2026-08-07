@@ -43,6 +43,7 @@ class DapPage(QWidget):
         self._channels = []          # rttFound 后的通道列表
         self._max_up = 0             # 固件实际 UP 通道数（描述符个数）
         self._max_down = 0           # 固件实际 DOWN 通道数
+        self._all_buf = ""           # "所有通道" 模式视图缓冲（带 [编号]-> 前缀）
         self._buffers = {}           # 通道编号 → 文本缓冲
         self._rx = 0
         self._tx = 0
@@ -544,9 +545,11 @@ class DapPage(QWidget):
         self._max_up = rtt["max_up"]
         self._max_down = rtt["max_down"]
         self._buffers = {}
+        self._all_buf = ""
         self._set_connected(True)
-        # 通道选择固定 0-15 共 16 槽位（对标 J-Link RTT Viewer）
-        self._fill_channel_combo(self.chCombo, self._channels, "UP")
+        # 通道选择固定 0-15 共 16 槽位；查看框顶部加 "所有通道"
+        self._fill_channel_combo(self.chCombo, self._channels, "UP",
+                                 all_option=True)
         self._fill_channel_combo(self.sendChCombo, self._channels, "DOWN")
         desc = (f"控制块 @ {rtt['addr']:#010x}   "
                 f"UP×{rtt['max_up']} / DOWN×{rtt['max_down']}")
@@ -556,16 +559,21 @@ class DapPage(QWidget):
         self.dt.sigStartRtt.emit()
 
     @staticmethod
-    def _fill_channel_combo(combo, channels: list, direction: str):
-        """固定填充 0-15 共 16 个通道槽位。
+    def _fill_channel_combo(combo, channels: list, direction: str,
+                            all_option: bool = False):
+        """填充通道下拉：固定 0-15 共 16 槽位。
 
         已配置通道显示 "编号: 名称"，未配置显示 "编号: -"；
         userData 存编号字符串，收发/缓冲一律按编号索引。
+        all_option=True 时顶部加 "所有通道"（userData="*"），
+        仅查看框使用（发送必须选具体通道）。
         """
         names = {c["index"]: c["name"] for c in channels
                  if c["direction"] == direction}
         combo.blockSignals(True)
         combo.clear()
+        if all_option:
+            combo.addItem("所有通道", userData="*")
         for i in range(dap_rtt.MAX_CHANNELS):
             name = names.get(i)
             combo.addItem(f"{i}: {name}" if name else f"{i}: -",
@@ -583,6 +591,7 @@ class DapPage(QWidget):
             self._channels = []
             self._max_up = 0
             self._max_down = 0
+            self._all_buf = ""
 
     def _on_reset_done(self):
         self.statusLabel.setText("目标已硬件复位（RTT 连接保持）")
@@ -593,23 +602,48 @@ class DapPage(QWidget):
         return str(self.chCombo.currentData() or "")
 
     def _on_channel_changed(self, _name: str):
-        self.rxView.setPlainText(self._buffers.get(self._current_channel(), ""))
+        cur = self._current_channel()
+        if cur == "*":
+            # 所有通道：显示拼接视图（_all_buf 实时维护，为空则重建）
+            text = self._all_buf or self._all_view_text()
+        else:
+            text = self._buffers.get(cur, "")
+        self.rxView.setPlainText(text)
         sb = self.rxView.verticalScrollBar()
         sb.setValue(sb.maximum())
 
+    def _all_view_text(self) -> str:
+        """按编号升序拼接各通道缓冲，每条带 [编号]-> 前缀。"""
+        parts = []
+        for i in range(dap_rtt.MAX_CHANNELS):
+            buf = self._buffers.get(str(i), "")
+            if buf:
+                parts.append(f"[{i}]-> {buf}")
+        return "".join(parts)
+
     def _clear_view(self):
-        self._buffers[self._current_channel()] = ""
+        if self._current_channel() == "*":
+            self._all_buf = ""
+            for i in range(dap_rtt.MAX_CHANNELS):
+                self._buffers.pop(str(i), None)
+        else:
+            self._buffers[self._current_channel()] = ""
         self.rxView.clear()
 
     def _save_log(self):
-        name = self._current_channel()
-        text = self._buffers.get(name, "")
+        cur = self._current_channel()
+        if cur == "*":
+            text = self._all_buf or self._all_view_text()
+            tag = "all"
+        else:
+            text = self._buffers.get(cur, "")
+            tag = cur
         if not text:
             InfoBar.info(title="无内容", content="当前通道日志为空",
                          duration=3000, parent=self)
             return
         path, _ = QFileDialog.getSaveFileName(
-            self, "保存 RTT 日志", f"rtt_{name}_{time.strftime('%Y%m%d_%H%M%S')}.log",
+            self, "保存 RTT 日志", f"rtt_{tag}_{time.strftime('%Y%m%d_%H%M%S')}.log",
             "文本文件 (*.log *.txt)")
         if not path:
             return
@@ -636,14 +670,22 @@ class DapPage(QWidget):
         if len(buf) > MAX_CHARS:
             buf = buf[len(buf) - MAX_CHARS // 2:]
         self._buffers[ch_name] = buf
-        if ch_name != self._current_channel():
+        cur = self._current_channel()
+        # 显示文本：所有通道模式每条数据加 [编号]-> 前缀标识来源
+        disp = text
+        if cur == "*":
+            disp = f"[{ch_name}]-> {text}"
+            self._all_buf += disp
+            if len(self._all_buf) > MAX_CHARS:
+                self._all_buf = self._all_buf[len(self._all_buf) - MAX_CHARS // 2:]
+        elif ch_name != cur:
             return
         at_bottom = self.rxView.verticalScrollBar().value() >= \
             self.rxView.verticalScrollBar().maximum() - 2
         self.rxView.moveCursor(self.rxView.textCursor().MoveOperation.End)
-        self.rxView.insertPlainText(text)
+        self.rxView.insertPlainText(disp)
         if len(self.rxView.toPlainText()) > MAX_CHARS:
-            self.rxView.setPlainText(buf)
+            self.rxView.setPlainText(self._all_buf if cur == "*" else buf)
         if at_bottom and self.scrollCheck.isChecked():
             self.rxView.verticalScrollBar().setValue(
                 self.rxView.verticalScrollBar().maximum())
@@ -686,7 +728,7 @@ class DapPage(QWidget):
     def _echo(self, text: str):
         """本地回显：写入当前查看的上行通道缓冲（绿色）。"""
         ch = self._current_channel()
-        if not ch:
+        if not ch or ch == "*":   # 所有通道模式无单一归属，跳过回显
             return
         buf = self._buffers.get(ch, "") + text
         self._buffers[ch] = buf
