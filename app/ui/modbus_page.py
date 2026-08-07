@@ -126,7 +126,7 @@ class ModbusPage(QWidget):
         v = QVBoxLayout(card)
         v.setContentsMargins(16, 14, 16, 14)
         v.setSpacing(8)
-        v.addWidget(SubtitleLabel("连接", card))
+        v.addWidget(SubtitleLabel("Modbus连接设置", card))
 
         self.libLabel = CaptionLabel(mb.pymodbus_info(), card)
         self.libLabel.setWordWrap(True)

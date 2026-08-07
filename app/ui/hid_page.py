@@ -301,7 +301,7 @@ class HidPage(QWidget):
         pauseBtn.toggled.connect(self._on_pause)
         clearBtn = ToolButton(FluentIcon.DELETE, card)
         clearBtn.setToolTip("清屏")
-        clearBtn.clicked.connect(lambda _=False: self.rxView.clear())
+        clearBtn.clicked.connect(self._clear_view)
         bar.addWidget(pauseBtn)
         bar.addWidget(clearBtn)
         v.addLayout(bar)
@@ -321,7 +321,7 @@ class HidPage(QWidget):
         h.setContentsMargins(12, 10, 12, 10)
         h.setSpacing(8)
         self.sendEdit = LineEdit(card)
-        self.sendEdit.setPlaceholderText("HEX：AA BB CC（支持空格/逗号/0x 前缀）")
+        self.sendEdit.setPlaceholderText("HEX：首字节为报告 ID + 数据")
         self.sendEdit.returnPressed.connect(self._on_send)
         self.sendBtn = PrimaryPushButton("发送", card)
         self.sendBtn.setFixedWidth(90)
@@ -649,6 +649,13 @@ class HidPage(QWidget):
 
     def _on_pause(self, on: bool):
         self._paused = on
+
+    def _clear_view(self):
+        """清屏：清空接收区并清零 RX/TX 统计。"""
+        self.rxView.clear()
+        self._rx = 0
+        self._tx = 0
+        self._update_counts()
 
     def _append(self, line: str, match_text: str = ""):
         cur = self.rxView

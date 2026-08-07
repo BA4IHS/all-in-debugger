@@ -80,7 +80,7 @@ class SshPage(QWidget):
         v = QVBoxLayout(card)
         v.setContentsMargins(16, 14, 16, 14)
         v.setSpacing(8)
-        v.addWidget(SubtitleLabel("连接", card))
+        v.addWidget(SubtitleLabel("SSH连接设置", card))
 
         self.libLabel = CaptionLabel(sw.paramiko_info(), card)
         self.libLabel.setWordWrap(True)

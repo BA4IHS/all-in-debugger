@@ -460,6 +460,7 @@ class McpService:
         self.token = token or ""
         self._server = None
         self._thread = None
+        self._error = None
 
     @property
     def url(self) -> str:
@@ -469,23 +470,42 @@ class McpService:
     def running(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
 
+    @property
+    def last_error(self):
+        """后台线程启动失败时的异常（依赖缺失/端口占用等）。"""
+        return self._error
+
     def start(self) -> str:
-        """启动服务；返回接入 URL。mcp/uvicorn 缺失时抛 ImportError。"""
+        """启动服务；返回接入 URL。
+
+        MCP 应用构建（注册全部工具 + 生成 ASGI 应用，约 0.6s）与
+        uvicorn 运行均放在后台线程，避免阻塞 GUI 启动。
+        失败（依赖缺失/端口占用等）记录到 last_error，GUI 不崩溃。
+        """
         if self.running:
             return self.url
-        import uvicorn
-
-        app = build_mcp(self.bridge).streamable_http_app()
-        if self.token:
-            app = _TokenMiddleware(app, self.token)
-        config = uvicorn.Config(app, host="127.0.0.1", port=self.port,
-                                log_level="warning", lifespan="on",
-                                access_log=False)
-        self._server = uvicorn.Server(config)
+        self._error = None
         self._thread = threading.Thread(
-            target=self._server.run, name="mcp-http", daemon=True)
+            target=self._serve, name="mcp-http", daemon=True)
         self._thread.start()
         return self.url
+
+    def _serve(self):
+        """后台线程：构建 MCP 应用并运行 uvicorn 直到 stop()。"""
+        try:
+            import uvicorn
+
+            app = build_mcp(self.bridge).streamable_http_app()
+            if self.token:
+                app = _TokenMiddleware(app, self.token)
+            config = uvicorn.Config(app, host="127.0.0.1", port=self.port,
+                                    log_level="warning", lifespan="on",
+                                    access_log=False)
+            self._server = uvicorn.Server(config)
+            self._server.run()
+        except Exception as e:  # 依赖缺失/端口占用等：记录错误，不崩溃
+            self._error = e
+            self._server = None
 
     def stop(self, timeout: float = 3.0):
         if self._server is not None:

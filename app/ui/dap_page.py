@@ -126,7 +126,7 @@ class DapPage(QWidget):
         v = QVBoxLayout(card)
         v.setContentsMargins(16, 14, 16, 14)
         v.setSpacing(10)
-        v.addWidget(SubtitleLabel("连接设置", card))
+        v.addWidget(SubtitleLabel("RTT连接设置", card))
 
         self.dllLabel = CaptionLabel("", card)
         self.dllLabel.setWordWrap(True)
@@ -629,6 +629,10 @@ class DapPage(QWidget):
         else:
             self._buffers[self._current_channel()] = ""
         self.rxView.clear()
+        # 清屏同时清零收发统计（右上角 RX/TX 计数）
+        self._rx = 0
+        self._tx = 0
+        self._update_counts()
 
     def _save_log(self):
         cur = self._current_channel()
