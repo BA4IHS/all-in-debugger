@@ -236,14 +236,22 @@ def build_mcp(bridge):
 
     @tool()
     @_guard
-    async def dap_open(path: str = "", speed_khz: int = 4000,
+    async def dap_open(path: str = "", speed_khz: int = 0,
                        reset: bool = False, cb_addr: int = 0,
-                       ram_start: int = 0, ram_size: int = 0) -> dict:
-        """打开调试器并经 SWD 连接目标、定位 RTT 控制块。cb_addr=0 时自动扫描；可给 ram_start/ram_size 限定扫描区间。"""
+                       ram_start: int = 0, ram_size: int = 0,
+                       kernel: str = "auto", chip: str = "") -> dict:
+        """打开调试器并经 SWD 连接目标、定位 RTT 控制块。chip 为芯片包名（app/chip_profiles/，用 dap_chip_profiles 查看，优先于 kernel）；kernel 选择目标 ARM 内核（auto/m0/m3/m4/m7/m23/m33/a7/a53）；cb_addr=0 时自动检测，可给 ram_start/ram_size 限定扫描区间；Cortex-A 不自动扫描须手动指定地址；speed_khz=0 时用芯片包默认（否则 4000kHz）。"""
         import anyio
         return await anyio.to_thread.run_sync(
             lambda: bridge.dap_open(path, speed_khz, reset, cb_addr,
-                                    ram_start, ram_size))
+                                    ram_start, ram_size, kernel, chip))
+
+    @tool()
+    @_guard
+    async def dap_chip_profiles() -> list:
+        """列出可用芯片包（名称/内核/RAM 区间/SWD 速度），供 dap_open 的 chip 参数使用。"""
+        import anyio
+        return await anyio.to_thread.run_sync(bridge.dap_chip_profiles)
 
     @tool()
     @_guard
@@ -255,7 +263,8 @@ def build_mcp(bridge):
     @tool()
     @_guard
     async def dap_rtt_write(channel: str, text: str) -> dict:
-        """向 RTT 下行通道写入文本。"""
+        """向 RTT 下行通道写入文本（channel 为固定槽位编号 "0"~"15"，
+        未配置通道拒绝写入）。"""
         import anyio
         return await anyio.to_thread.run_sync(
             lambda: bridge.dap_write(channel, text))
@@ -263,7 +272,8 @@ def build_mcp(bridge):
     @tool()
     @_guard
     async def dap_rtt_read_recent(channel: str = "0", limit: int = 2048) -> dict:
-        """读取指定 RTT 上行通道最近数据（UTF-8 文本与 HEX）。"""
+        """读取指定 RTT 上行通道最近数据（channel 为固定槽位编号 "0"~"15"，
+        未配置通道无数据；UTF-8 文本与 HEX）。"""
         import anyio
         data = await anyio.to_thread.run_sync(
             lambda: bridge.dap_read_recent(channel, limit))

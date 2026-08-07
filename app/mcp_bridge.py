@@ -271,12 +271,34 @@ class WorkerBridge:
     def dap_status(self):
         return self._query(self.dt, {"op": "snapshot"})
 
-    def dap_open(self, path: str = "", speed_khz: int = 4000,
+    def dap_open(self, path: str = "", speed_khz: int = 0,
                  reset: bool = False, cb_addr: int = 0,
-                 ram_start: int = 0, ram_size: int = 0):
+                 ram_start: int = 0, ram_size: int = 0,
+                 kernel: str = "auto", chip: str = ""):
+        """chip：芯片包名/stem（app/chip_profiles/），优先于 kernel。
+
+        speed_khz<=0 时按 芯片包默认速度 > 4000kHz 取。
+        """
+        from app import chip_profile
         cfg = {"path": str(path or ""), "clock": int(speed_khz) * 1000,
                "reset": bool(reset), "cb_addr": int(cb_addr),
-               "ram_start": int(ram_start), "ram_size": int(ram_size)}
+               "ram_start": int(ram_start), "ram_size": int(ram_size),
+               "kernel": str(kernel or "auto"), "regions": None}
+        chip_name = str(chip or "").strip()
+        if chip_name:
+            data = chip_profile.find_profile(chip_name)
+            if data is None:
+                raise BridgeError(f"芯片包不存在：{chip_name}")
+            cfg["kernel"] = str(data.get("kernel") or "auto")
+            regions = data.get("ram_regions")
+            if isinstance(regions, list) and regions:
+                cfg["regions"] = [[int(a), int(b)] for a, b in regions]
+            if not cfg["cb_addr"] and data.get("cb_addr"):
+                cfg["cb_addr"] = int(data["cb_addr"])
+            if cfg["clock"] <= 0 and data.get("swd_speed_khz"):
+                cfg["clock"] = int(data["swd_speed_khz"]) * 1000
+        if cfg["clock"] <= 0:
+            cfg["clock"] = 4_000_000  # 默认 4000 kHz
         args = self._emit_wait(
             [self.dt.worker.rttFound],
             [self.dt.worker.openFailed, self.dt.worker.errorOccurred],
@@ -284,8 +306,27 @@ class WorkerBridge:
         self.dt.sigStartRtt.emit()
         rtt = args[0]
         return {"cb_addr": rtt.get("addr", 0),
-                "channels": [{"name": c["name"], "direction": c["direction"]}
-                             for c in rtt.get("channels", [])]}
+                "channels": [{"index": c["index"], "name": c["name"],
+                               "direction": c["direction"]}
+                              for c in rtt.get("channels", [])]}
+
+    def dap_chip_profiles(self):
+        """列出可用芯片包，供 dap_open 的 chip 参数使用。"""
+        from app import chip_profile
+        out = []
+        for stem, name, data in chip_profile.list_profiles():
+            item = {"stem": stem, "name": name,
+                    "kernel": str(data.get("kernel") or "auto")}
+            if data.get("ram_regions"):
+                item["ram_regions"] = data["ram_regions"]
+            if data.get("swd_speed_khz"):
+                item["swd_speed_khz"] = data["swd_speed_khz"]
+            if data.get("cb_addr"):
+                item["cb_addr"] = data["cb_addr"]
+            if data.get("desc"):
+                item["desc"] = data["desc"]
+            out.append(item)
+        return out
 
     def dap_close(self):
         self.dt.sigClose.emit()

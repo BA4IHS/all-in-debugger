@@ -1,0 +1,7 @@
+{
+  "name": "STM32F103 (Cortex-M3)",
+  "kernel": "m3",
+  "ram_regions": [[536870912, 536891392]],
+  "swd_speed_khz": 4000,
+  "desc": "STM32F103 全系：Cortex-M3 @72MHz，内置 SRAM 最大 20KB @ 0x20000000-0x20004FFF（已实测 STM32F103C8，IDCODE=0x1BA01477）"
+}

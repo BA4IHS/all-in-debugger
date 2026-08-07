@@ -44,7 +44,7 @@ class DapWorker(QObject):
 
     @pyqtSlot(dict)
     def requestOpen(self, cfg: dict):
-        """cfg: {path, clock, ram_start, ram_size, cb_addr, reset}"""
+        """cfg: {path, clock, ram_start, ram_size, cb_addr, reset, kernel}"""
         if self._probe.opened:
             self.openFailed.emit("调试器已打开")
             return
@@ -70,16 +70,21 @@ class DapWorker(QObject):
             self.openFailed.emit(str(e))
             return
         self.probeOpened.emit(f"IDCODE={idcode:#010x}")
-        # RTT 控制块：指定地址优先，否则自动扫描
+        # RTT 控制块：指定地址优先，否则按芯片包/内核预设解析区间
         try:
             cb_addr = int(cfg.get("cb_addr") or 0)
             if not cb_addr:
-                regions = None
-                ram_start = int(cfg.get("ram_start") or 0)
-                ram_size = int(cfg.get("ram_size") or 0)
-                if ram_start and ram_size:
-                    regions = [(ram_start, ram_start + ram_size)]
-                cb_addr = dap_rtt.find_control_block(target, regions)
+                kernel = dap_rtt.get_kernel(cfg.get("kernel"))
+                regions = self._resolve_regions(cfg, kernel)
+                if regions is None:
+                    # Cortex-A 无通用 RAM 布局（SEGGER 官方文档），不自动扫描
+                    self.errorOccurred.emit(
+                        "Cortex-A 无通用 RAM 布局：请手动指定控制块地址"
+                        "或 RAM 区间（不自动扫描）")
+                    return
+                cb_addr = dap_rtt.find_control_block(
+                    target, regions,
+                    try_vtor=(kernel["family"] == "m"))
             if not cb_addr:
                 self.errorOccurred.emit(
                     "未找到 RTT 控制块：确认固件已初始化 SEGGER RTT，"
@@ -93,6 +98,30 @@ class DapWorker(QObject):
         self._rxBufs.clear()
         self.rttFound.emit(rtt)
 
+    @staticmethod
+    def _resolve_regions(cfg: dict, kernel: dict):
+        """解析 RTT 扫描区间；Cortex-A 无区间时返回 None（须手动指定）。
+
+        优先级：cfg.regions（芯片包/UI 传入）> cfg.ram_start/ram_size
+                > 内核预设 ram_regions > 内置默认区间。
+        """
+        regions = cfg.get("regions")
+        if isinstance(regions, list) and regions:
+            norm = []
+            for r in regions:
+                if (isinstance(r, (list, tuple)) and len(r) == 2
+                        and all(isinstance(v, int) for v in r)):
+                    norm.append((int(r[0]), int(r[1])))
+            if norm:
+                return norm
+        ram_start = int(cfg.get("ram_start") or 0)
+        ram_size = int(cfg.get("ram_size") or 0)
+        if ram_start and ram_size:
+            return [(ram_start, ram_start + ram_size)]
+        if kernel["family"] == "a":
+            return None
+        return kernel.get("ram_regions") or list(dap_rtt.DEFAULT_RAM_REGIONS)
+
     @pyqtSlot()
     def requestStartRtt(self):
         if self._rtt is not None:
@@ -103,22 +132,28 @@ class DapWorker(QObject):
         self._rttActive = False
 
     @pyqtSlot(str, bytes)
-    def requestWrite(self, channel_name: str, data: bytes):
+    def requestWrite(self, channel: str, data: bytes):
+        """channel 为固定槽位编号 "0"~"15"；未配置通道拒绝写入。"""
         if self._rtt is None:
             self.errorOccurred.emit("RTT 未就绪")
             return
-        ch = next((c for c in self._rtt["channels"]
-                   if c["direction"] == "DOWN" and c["name"] == channel_name),
-                  None)
+        try:
+            idx = int(channel)
+        except (TypeError, ValueError):
+            self.errorOccurred.emit(f"通道编号无效：{channel}")
+            return
+        ch = dap_rtt.channel_by_index(self._rtt, "DOWN", idx)
         if ch is None:
-            self.errorOccurred.emit(f"DOWN 通道 {channel_name} 不存在")
+            self.errorOccurred.emit(
+                f"DOWN 通道 {idx} 未配置"
+                f"（固件仅 {self._rtt['max_down']} 个下行通道）")
             return
         try:
             n = dap_rtt.write_channel(self._target, ch, bytes(data))
         except DapError as e:
             self.errorOccurred.emit(f"RTT 写入失败：{e}")
             return
-        self.dataWritten.emit(channel_name, n)
+        self.dataWritten.emit(str(idx), n)
 
     @pyqtSlot()
     def requestReset(self):
@@ -173,7 +208,8 @@ class DapWorker(QObject):
         if self._rtt:
             info["cb_addr"] = self._rtt.get("addr", 0)
             info["channels"] = [
-                {"name": c["name"], "direction": c["direction"]}
+                {"index": c["index"], "name": c["name"],
+                 "direction": c["direction"]}
                 for c in self._rtt["channels"]]
         return info
 
@@ -202,6 +238,9 @@ class DapWorker(QObject):
                 break
             if self._rttActive and self._rtt is not None:
                 self._poll_once()
+                # 轮询节流：原实现无 sleep（_pollMs 定义了却从未使用），
+                # RTT 激活后循环紧转占满一个 CPU 核
+                time.sleep(self._pollMs / 1000.0)
             else:
                 time.sleep(0.02)
         self._cleanup_probe()
@@ -214,11 +253,12 @@ class DapWorker(QObject):
                     continue
                 data = dap_rtt.read_channel(self._target, ch)
                 if data:
-                    buf = self._rxBufs.setdefault(ch["name"], bytearray())
+                    key = str(ch["index"])   # 通道编号作标识
+                    buf = self._rxBufs.setdefault(key, bytearray())
                     buf.extend(data)
                     if len(buf) > RX_CAP:
                         del buf[:len(buf) - RX_CAP]
-                    self.dataReceived.emit(ch["name"], data, time.time())
+                    self.dataReceived.emit(key, data, time.time())
         except DapError as e:
             self._rttActive = False
             self.errorOccurred.emit(f"RTT 轮询失败（目标断开？）：{e}")

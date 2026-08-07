@@ -26,6 +26,8 @@ from qfluentwidgets import (
 
 from app import serial_utils as su
 from app import dap_core
+from app import dap_rtt
+from app import chip_profile
 from app.dap_worker import DapThread
 from app.ui.console_style import setup_log_view
 
@@ -39,10 +41,14 @@ class DapPage(QWidget):
         self.dt = dt
         self._probes = []
         self._channels = []          # rttFound 后的通道列表
-        self._down_channels = []     # DOWN 通道名列表
-        self._buffers = {}           # 通道名 → 文本缓冲
+        self._max_up = 0             # 固件实际 UP 通道数（描述符个数）
+        self._max_down = 0           # 固件实际 DOWN 通道数
+        self._buffers = {}           # 通道编号 → 文本缓冲
         self._rx = 0
         self._tx = 0
+        self._chip_items = []        # [(stem, name, data), ...] 芯片包列表
+        self._active_chip = None     # 当前选中的芯片包数据
+        self._clock_touched = False  # 用户手动改过 SWD 速度则不再被芯片包覆盖
 
         scroll = SingleDirectionScrollArea(self)
         left = QWidget()
@@ -75,6 +81,7 @@ class DapPage(QWidget):
         self._set_connected(False)
         self.dllLabel.setText(dap_core.load_info())
         self._on_cb_mode()
+        self._reload_chip_combo()  # 填充芯片/内核下拉（依赖全部控件已建）
         self._apply_radio_style()
         qconfig.themeChangedFinished.connect(self._apply_radio_style)
 
@@ -126,10 +133,11 @@ class DapPage(QWidget):
 
         prow = QHBoxLayout()
         self.probeCombo = ComboBox(card)
+        self.probeCombo.setFixedWidth(240)  # 锁定宽度，避免长调试器名被裁切
         refresh = ToolButton(FluentIcon.UPDATE, card)
         refresh.setToolTip("枚举 CMSIS-DAP 调试器（在线验证，排除假冒设备）")
         refresh.clicked.connect(lambda _=False: self._enum_probes(notify=True))
-        prow.addWidget(self.probeCombo, 1)
+        prow.addWidget(self.probeCombo)
         prow.addWidget(refresh)
         v.addWidget(BodyLabel("调试器", card))
         v.addLayout(prow)
@@ -149,6 +157,21 @@ class DapPage(QWidget):
         crow.addWidget(CaptionLabel("kHz", card))
         crow.addStretch(1)
         v.addLayout(crow)
+
+        krow = QHBoxLayout()
+        self.kernelCombo = ComboBox(card)
+        self.kernelCombo.setToolTip(dap_rtt.KERNELS[0]["desc"])
+        self.kernelCombo.currentIndexChanged.connect(self._on_kernel_changed)
+        self.kernelCombo.setFixedWidth(240)  # 锁定宽度，避免长芯片名被裁切
+        chip_refresh = ToolButton(FluentIcon.UPDATE, card)
+        chip_refresh.setToolTip(
+            "重载芯片包文件（app/chip_profiles/*.json，可自定义添加）")
+        chip_refresh.clicked.connect(
+            lambda _=False: self._reload_chip_combo(notify=True))
+        krow.addWidget(self.kernelCombo)
+        krow.addWidget(chip_refresh)
+        v.addWidget(BodyLabel("芯片 / 内核", card))
+        v.addLayout(krow)
 
         self.resetCheck = CheckBox("连接后硬件复位", card)
         v.addWidget(self.resetCheck)
@@ -202,6 +225,10 @@ class DapPage(QWidget):
         r1.addWidget(self.ramSizeEdit, 1)
         v.addLayout(r1)
 
+        self.regionHint = CaptionLabel("", card)
+        self.regionHint.setWordWrap(True)
+        v.addWidget(self.regionHint)
+
         self.chLabel = CaptionLabel("通道：-", card)
         self.chLabel.setWordWrap(True)
         v.addWidget(self.chLabel)
@@ -213,6 +240,115 @@ class DapPage(QWidget):
         self.cbAddrEdit.setVisible(addr)
         self.ramStartEdit.setVisible(region)
         self.ramSizeEdit.setVisible(region)
+        self._update_region_hint()
+
+    def _reload_chip_combo(self, notify=False):
+        """填充「芯片 / 内核」下拉：内置内核 + 用户芯片包（可自定义添加）。"""
+        from collections import Counter
+        self._chip_items = chip_profile.list_profiles()
+        prev = self._current_kernel_key()
+        cnt = Counter(name for _s, name, _d in self._chip_items)
+        self.kernelCombo.blockSignals(True)
+        self.kernelCombo.clear()
+        for k in dap_rtt.KERNELS:
+            self.kernelCombo.addItem(f"内核：{k['name']}",
+                                     userData=("kernel", k["key"]))
+        for stem, name, _data in self._chip_items:
+            label = (f"芯片：{name}  [{stem}]" if cnt[name] > 1
+                     else f"芯片：{name}")
+            self.kernelCombo.addItem(label, userData=("chip", stem))
+        idx = self._find_combo_index(prev)
+        self.kernelCombo.setCurrentIndex(idx)
+        self.kernelCombo.blockSignals(False)
+        if notify:
+            InfoBar.success(title="芯片包已重载",
+                            content=f"共 {len(self._chip_items)} 个芯片包",
+                            duration=3000, parent=self)
+        self._on_kernel_changed(idx)
+
+    def _find_combo_index(self, target: tuple) -> int:
+        for i in range(self.kernelCombo.count()):
+            if self.kernelCombo.itemData(i) == target:
+                return i
+        return 0
+
+    def _current_kernel_key(self) -> tuple:
+        """返回 ("kernel"|"chip", key/stem)。"""
+        data = self.kernelCombo.currentData()
+        if isinstance(data, (tuple, list)) and len(data) == 2:
+            return (str(data[0]), str(data[1]))
+        return ("kernel", "auto")
+
+    def _chip_config(self) -> dict:
+        """当前选择（内核或芯片包）生效的配置。"""
+        kind, key = self._current_kernel_key()
+        cfg = {"kernel": "auto", "regions": None, "clock": 0, "cb_addr": 0}
+        if kind == "kernel":
+            cfg["kernel"] = dap_rtt.get_kernel(key)["key"]
+            return cfg
+        data = next((d for s, _n, d in self._chip_items if s == key), None)
+        if not data:
+            return cfg
+        cfg["kernel"] = str(data.get("kernel") or "auto")
+        regions = data.get("ram_regions")
+        if isinstance(regions, list) and regions:
+            cfg["regions"] = [[int(a), int(b)] for a, b in regions]
+        cfg["clock"] = int(data.get("swd_speed_khz") or 0)
+        cfg["cb_addr"] = int(data.get("cb_addr") or 0)
+        return cfg
+
+    def _on_kernel_changed(self, _idx: int):
+        kind, key = self._current_kernel_key()
+        self._active_chip = None
+        if kind == "kernel":
+            self.kernelCombo.setToolTip(dap_rtt.get_kernel(key)["desc"])
+        else:
+            data = next((d for s, _n, d in self._chip_items if s == key), None)
+            if data is None:
+                return
+            self._active_chip = data
+            self.kernelCombo.setToolTip(data.get("desc") or "")
+        cfg = self._chip_config()
+        # 芯片包带默认 SWD 速度：用户未手动改过速度时自动应用
+        if cfg.get("clock") and not self._clock_touched:
+            self.clockCombo.blockSignals(True)
+            self.clockCombo.setCurrentText(str(cfg["clock"]))
+            self.clockCombo.blockSignals(False)
+        # 芯片包带固定控制块地址：预填并切到「固定地址」模式
+        if kind == "chip" and cfg.get("cb_addr"):
+            self.cbAddrEdit.setText(f"{cfg['cb_addr']:x}")
+            if not self.cbAddrRadio.isChecked():
+                self.cbAddrRadio.setChecked(True)
+        # Cortex-A 且自动模式：提示无通用 RAM 布局
+        k = dap_rtt.get_kernel(cfg["kernel"])
+        if (k["family"] == "a" and self.cbAutoRadio.isChecked()
+                and not cfg.get("regions")):
+            InfoBar.warning(
+                title="Cortex-A 提示",
+                content="应用处理器无通用 RAM 布局，自动检测将直接失败，"
+                        "请改用「固定地址」或「指定 RAM 区间」",
+                duration=6000, parent=self)
+        self._update_region_hint()
+
+    def _update_region_hint(self):
+        """RTT 控制块卡：自动模式下显示当前生效的扫描区间摘要。"""
+        if not self.cbAutoRadio.isChecked():
+            self.regionHint.setText("")
+            return
+        cfg = self._chip_config()
+        k = dap_rtt.get_kernel(cfg["kernel"])
+        if k["family"] == "a" and not cfg.get("regions"):
+            self.regionHint.setText(
+                "Cortex-A：无通用 RAM 布局，请手动指定地址/区间")
+            return
+        regions = (cfg.get("regions") or k.get("ram_regions")
+                   or dap_rtt.DEFAULT_RAM_REGIONS)
+        text = "；".join(f"{s:#x}-{e:#x}" for s, e in regions)
+        self.regionHint.setText(f"自动模式将扫描：{text}")
+
+    def _on_clock_text(self, _text: str):
+        """用户手动改过 SWD 速度后，不再被芯片包默认速度覆盖。"""
+        self._clock_touched = True
 
     # ── 左：显示选项 ───────────────────────────────────────────
 
@@ -312,6 +448,8 @@ class DapPage(QWidget):
         self.closeBtn.clicked.connect(lambda _=False: self.dt.sigClose.emit())
         self.resetBtn.clicked.connect(lambda _=False: self.dt.sigReset.emit())
         self.chCombo.currentTextChanged.connect(self._on_channel_changed)
+        self.clockCombo.currentTextChanged.connect(self._on_clock_text)
+        self.probeCombo.currentIndexChanged.connect(self._update_probe_tooltip)
 
     # ── 枚举 / 连接 ────────────────────────────────────────────
 
@@ -329,10 +467,15 @@ class DapPage(QWidget):
             self.probeCombo.addItem(
                 f"{p['vid']:04X}:{p['pid']:04X}  "
                 f"{p.get('product') or 'CMSIS-DAP'}  [{tag}]")
+        self._update_probe_tooltip()
         if notify:
             InfoBar.success(title="枚举完成",
                             content=f"发现 {len(self._probes)} 个调试器",
                             duration=3000, parent=self)
+
+    def _update_probe_tooltip(self, *_):
+        """调试器下拉文本过长被裁时，悬停可看完整项文本。"""
+        self.probeCombo.setToolTip(self.probeCombo.currentText())
 
     def _on_open(self):
         idx = self.probeCombo.currentIndex()
@@ -350,14 +493,18 @@ class DapPage(QWidget):
                             content="请输入 1~50000 之间的 SWD 速度（kHz）",
                             duration=4000, parent=self)
             return
+        chip = self._chip_config()
         cfg = {
             "path": p["path"],
             "clock": clock_khz * 1000,
             "reset": self.resetCheck.isChecked(),
             "ram_start": 0, "ram_size": 0, "cb_addr": 0,
+            "kernel": chip["kernel"],
+            "regions": chip["regions"],
         }
         if self.cbAddrRadio.isChecked():
             cfg["cb_addr"] = self._parse_hex(self.cbAddrEdit.text())
+            cfg["regions"] = None
             if not cfg["cb_addr"]:
                 InfoBar.warning(title="地址无效",
                                 content="请填写有效的控制块地址（十六进制）",
@@ -366,6 +513,7 @@ class DapPage(QWidget):
         elif self.cbRegionRadio.isChecked():
             cfg["ram_start"] = self._parse_hex(self.ramStartEdit.text())
             cfg["ram_size"] = self._parse_hex(self.ramSizeEdit.text())
+            cfg["regions"] = None
             if not (cfg["ram_start"] and cfg["ram_size"]):
                 InfoBar.warning(title="区间无效",
                                 content="请填写 RAM 起始地址与大小（十六进制）",
@@ -393,24 +541,36 @@ class DapPage(QWidget):
 
     def _on_rtt_found(self, rtt: dict):
         self._channels = rtt["channels"]
+        self._max_up = rtt["max_up"]
+        self._max_down = rtt["max_down"]
         self._buffers = {}
         self._set_connected(True)
-        ups = [c["name"] for c in self._channels
-               if c["direction"] == "UP" and c["size"]]
-        self._down_channels = [c["name"] for c in self._channels
-                               if c["direction"] == "DOWN" and c["size"]]
-        self.chCombo.blockSignals(True)
-        self.chCombo.clear()
-        self.chCombo.addItems(ups or ["（无上行通道）"])
-        self.chCombo.blockSignals(False)
-        self.sendChCombo.clear()
-        self.sendChCombo.addItems(self._down_channels or ["（无下行通道）"])
+        # 通道选择固定 0-15 共 16 槽位（对标 J-Link RTT Viewer）
+        self._fill_channel_combo(self.chCombo, self._channels, "UP")
+        self._fill_channel_combo(self.sendChCombo, self._channels, "DOWN")
         desc = (f"控制块 @ {rtt['addr']:#010x}   "
                 f"UP×{rtt['max_up']} / DOWN×{rtt['max_down']}")
         self.chLabel.setText(desc)
         self.statusLabel.setText(
             f"RTT 已连接  控制块 @ {rtt['addr']:#010x}")
         self.dt.sigStartRtt.emit()
+
+    @staticmethod
+    def _fill_channel_combo(combo, channels: list, direction: str):
+        """固定填充 0-15 共 16 个通道槽位。
+
+        已配置通道显示 "编号: 名称"，未配置显示 "编号: -"；
+        userData 存编号字符串，收发/缓冲一律按编号索引。
+        """
+        names = {c["index"]: c["name"] for c in channels
+                 if c["direction"] == direction}
+        combo.blockSignals(True)
+        combo.clear()
+        for i in range(dap_rtt.MAX_CHANNELS):
+            name = names.get(i)
+            combo.addItem(f"{i}: {name}" if name else f"{i}: -",
+                          userData=str(i))
+        combo.blockSignals(False)
 
     def _set_connected(self, on: bool):
         self.openBtn.setEnabled(not on)
@@ -421,7 +581,8 @@ class DapPage(QWidget):
             self.statusLabel.setText("未连接")
             self.chLabel.setText("通道：-")
             self._channels = []
-            self._down_channels = []
+            self._max_up = 0
+            self._max_down = 0
 
     def _on_reset_done(self):
         self.statusLabel.setText("目标已硬件复位（RTT 连接保持）")
@@ -429,7 +590,7 @@ class DapPage(QWidget):
     # ── 通道视图 ───────────────────────────────────────────────
 
     def _current_channel(self) -> str:
-        return self.chCombo.currentText()
+        return str(self.chCombo.currentData() or "")
 
     def _on_channel_changed(self, _name: str):
         self.rxView.setPlainText(self._buffers.get(self._current_channel(), ""))
@@ -498,8 +659,7 @@ class DapPage(QWidget):
     # ── 输入行 ─────────────────────────────────────────────────
 
     def _send_channel(self) -> str:
-        name = self.sendChCombo.currentText()
-        return name if name in self._down_channels else ""
+        return str(self.sendChCombo.currentData() or "")
 
     def _on_input_changed(self, text: str):
         """逐字符发送：每次按键立即写入新增字符。"""

@@ -61,6 +61,26 @@ _AP_DRW = 0x0C
 _CSW_32BIT = 0x02
 _CSW_AUTO_INC = 0x10
 
+# ABORT 寄存器（DP 0x00 写）：置位各位清除对应 sticky 错误
+# 0x1E = ORUNERRCLR|STICKYCMPCLR|STICKYERRCLR|WDATAERRCLR
+_ABORT_CLEAR_STICKY = 0x1E
+
+# DAPLink v0257 固件实测限制（_diag_dap15/16.py）：
+# - 响应缓冲 64 字节 → DAP_Transfer 读最多 15 字/次（3+4*15=63≤64），
+#   16 字（67B）固件溢出挂死（WinUSB 读 err=31，之后整机无响应）；
+# - 请求缓冲限制 → DAP_Transfer 写最多 13 字/次（3+5*13=68B OK，
+#   14 字 73B 失败）。超限必须分多次 transfer，不能依赖 255 上限。
+_DAP_MAX_READ_WORDS = 15
+_DAP_MAX_WRITE_WORDS = 13
+
+# DP CTRL/STAT 电源位（ARM ADIv5 规范）
+_CDBGPWRUPREQ = 0x40000000   # bit30 调试电源请求
+_CSYSPWRUPREQ = 0x10000000   # bit28 系统电源请求
+_CDBGPWRUPACK = 0x80000000   # bit31 调试电源确认
+_CSYSPWRUPACK = 0x20000000   # bit29 系统电源确认
+_POWERUP_REQUEST = _CDBGPWRUPREQ | _CSYSPWRUPREQ   # 0x50000000
+_POWERUP_ACK = _CDBGPWRUPACK | _CSYSPWRUPACK       # 0xA0000000
+
 # DAP_SWJ_Pins 引脚位
 PIN_SWCLK = 1 << 0
 PIN_SWDIO = 1 << 1
@@ -275,7 +295,20 @@ class DapProbe:
         if len(payload) < self.packet_size:
             payload += b"\x00" * (self.packet_size - len(payload))
         self._winusb.write(payload)
-        return self._winusb.read(self.packet_size)
+        # 大响应（如内存批量读）跨多个 bulk 包。实测（DAPLink v0257）：
+        # WinUSB 驱动不会聚合多包，单次 ReadPipe 读大 buffer 会
+        # err=31 失败；必须按 packet_size 逐包读，直到读回短包
+        # （长度 < packet_size）即传输结束。响应长度恒为 3+4n，
+        # 永非 64 的倍数，故必有短包收尾（不靠超时误判）。
+        total = bytearray()
+        for _ in range(64):     # 上限防护（最大响应 3+4*255≈1KB）
+            chunk = self._winusb.read(self.packet_size)
+            if not chunk:
+                break           # 管道超时返回空 → 传输结束
+            total += chunk
+            if len(chunk) < self.packet_size:
+                break           # 短包 → 传输结束
+        return bytes(total)
 
     def _query_packet_size(self):
         try:
@@ -416,8 +449,8 @@ class SwdTarget:
         return req
 
     def dp_read(self, addr: int) -> int:
-        # DP 读在同一次 transfer 内直接返回数据（与 AP 读的流水线不同，
-        # diag6 实测：IDCODE 读请求的数据字即为 IDCODE，RDBUFF 返回 0）。
+        # DP 读在同一次 transfer 内直接返回数据（真机实测：IDCODE 读请求
+        # 的数据字即为 IDCODE；RDBUFF 读恒返回 0，仅作 DP 读参考）。
         ack, count, vals = self.probe.transfer(
             self.dap_index, [(self._swd_req(False, True, addr), None)])
         if ack != SWD_ACK_OK or count < 1 or not vals:
@@ -432,11 +465,11 @@ class SwdTarget:
 
     def ap_read(self, addr: int, ap_sel: int = 0) -> int:
         self._set_ap(ap_sel)
-        # AP 读需要两次 transfer：第一次启动，第二次取 RDBUFF
-        _, _, _ = self.probe.transfer(
-            self.dap_index, [(self._swd_req(True, True, addr), None)])
+        # 真机实测（DAPLink v0257 WinUSB）：AP 读在同一次 transfer 内
+        # 直接返回数据（固件内部已自动补 RDBUFF 收尾）；RDBUFF 读恒
+        # 返回 0，旧的两阶段实现（发起+RDBUFF）导致 read_mem32 恒为 0。
         ack, count, vals = self.probe.transfer(
-            self.dap_index, [(self._swd_req(False, True, 0x0C), None)])
+            self.dap_index, [(self._swd_req(True, True, addr), None)])
         if ack != SWD_ACK_OK or count < 1 or not vals:
             raise DapError(f"AP 读 {addr:#x} 失败（ACK={ack:#x}）")
         return vals[0]
@@ -454,6 +487,24 @@ class SwdTarget:
             self.dp_write(_DP_SELECT, want)
             self._select_cache = want
 
+    def power_up(self, timeout_ms: int = 2000) -> None:
+        """请求调试/系统电源上电并等待 ACK（ARM ADIv5 连接必需步骤）。
+
+        冷连接/拔插后 AP 电源域未上电（CTRL/STAT 的 CDBGPWRUPACK、
+        CSYSPWRUPACK 均为 0），此时所有 AP 访问（含内存读写）立即
+        FAULT 并置位 STICKYERR，导致 RTT 扫描静默失败。必须先写
+        CTRL/STAT = CDBGPWRUPREQ|CSYSPWRUPREQ 请求上电，再轮询
+        等待 ACK 置位（真机实测 DAPLink v0257 一次请求即上电）。
+        """
+        self.dp_write(_DP_CTRL_STAT, _POWERUP_REQUEST)
+        deadline = time.monotonic() + timeout_ms / 1000.0
+        while True:
+            stat = self.dp_read(_DP_CTRL_STAT)
+            if (stat & _POWERUP_ACK) == _POWERUP_ACK:
+                return
+            if time.monotonic() > deadline:
+                raise DapError("调试电源上电超时（检查 SWD 接线/芯片供电）")
+
     # ── 内存访问 ───────────────────────────────────────────────
 
     def _setup_mem(self, ap_sel: int = 0):
@@ -470,19 +521,37 @@ class SwdTarget:
         self.ap_write(_AP_DRW, int(value) & 0xFFFFFFFF, ap_sel)
 
     def read_mem_block(self, addr: int, count: int, ap_sel: int = 0) -> bytes:
-        """按 32 位字读内存（TAR 自增，跨 1KB 边界分段）。"""
+        """按 32 位字读内存，支持任意字节地址与长度（跨 1KB 边界分段）。
+
+        非 4 对齐地址：先按字读覆盖 [addr, addr+count) 的最小字区间，
+        再按字节切片返回。RTT 环形缓冲的读写指针是任意字节偏移
+        （如 15 字节消息 → rd=0,15,30…），旧实现从对齐地址整块读后
+        只截尾部、头部 (addr&3) 字节错位，真机表现为
+        "SEGGER_RTT_TESSEGGER_RTT_TEST" 式错位拼接。
+        真机实测（DAPLink v0257 WinUSB）：AP 读为立即返回语义——连发
+        n 个 AP DRW 读请求，响应数据即 n 个目标字（固件内部自动补
+        RDBUFF 收尾），无需追加 RDBUFF 读、无需跳过残留值。
+        固件响应缓冲仅 64 字节，单次 DAP_Transfer 读请求数必须 ≤15
+        （3+4*15=63B），超限（16 字=67B）固件溢出挂死；超长数据
+        按 15 字分段，避免旧实现（255 字/次）的真机崩溃。
+        """
+        if count <= 0:
+            return b""
         self.ap_write(_AP_CSW, _CSW_32BIT | _CSW_AUTO_INC, ap_sel)
         out = bytearray()
-        pos = addr & 0xFFFFFFFC
-        remain = count
+        pos = addr & 0xFFFFFFFC                    # 起始字对齐（向下）
+        end = addr + count
+        remain = ((end + 3) & 0xFFFFFFFC) - pos    # 覆盖到末尾的完整字数
         while remain > 0:
             chunk = min(remain, 0x400 - (pos & 0x3FF))
             chunk -= chunk & 3
             if chunk <= 0:
                 chunk = 4
+            chunk = min(chunk, _DAP_MAX_READ_WORDS * 4)   # 固件响应缓冲上限
+            n = chunk // 4
             self.ap_write(_AP_TAR, pos, ap_sel)
             reqs = [(self._swd_req(True, True, _AP_DRW), None)
-                    for _ in range(chunk // 4)]
+                    for _ in range(n)]
             _, got, vals = self.probe.transfer(self.dap_index, reqs)
             if got < len(reqs):
                 raise DapError(f"内存读 {pos:#x} 中断（got={got}）")
@@ -491,32 +560,74 @@ class SwdTarget:
             pos += chunk
             remain -= chunk
         self.ap_write(_AP_CSW, _CSW_32BIT, ap_sel)
-        return bytes(out[:count])
+        head = addr - (addr & 0xFFFFFFFC)
+        return bytes(out[head:head + count])
 
     def write_mem_block(self, addr: int, data: bytes, ap_sel: int = 0):
+        """按 32 位字写内存；任意字节地址/长度（跨 1KB 边界分段）。
+
+        RTT DOWN 通道的写指针 wr 为任意字节偏移：直接整字写会破坏
+        addr 前后相邻字节，首/尾不完整字必须先读回所在字、合并目标
+        字节再写回（读-改-写）。
+        """
+        if not data:
+            return
+        payload = bytes(data)
         self.ap_write(_AP_CSW, _CSW_32BIT | _CSW_AUTO_INC, ap_sel)
-        pad = data + b"\x00" * ((4 - len(data) & 3) & 3)
         pos = addr & 0xFFFFFFFC
-        off = 0
-        while off < len(pad):
-            chunk = min(len(pad) - off, 0x400 - (pos & 0x3FF))
+        off = addr - pos                             # 首字内偏移 0..3
+        idx = 0
+        n = len(payload)
+        # 首字（非对齐）：读-改-写，保护 addr 之前的字节
+        if off:
+            take = min(4 - off, n)
+            hb = bytearray(self.read_mem32(pos, ap_sel).to_bytes(4, "little"))
+            hb[off:off + take] = payload[:take]
+            self.ap_write(_AP_CSW, _CSW_32BIT | _CSW_AUTO_INC, ap_sel)
+            self.ap_write(_AP_TAR, pos, ap_sel)
+            self.ap_write(_AP_DRW, int.from_bytes(hb, "little"), ap_sel)
+            pos += 4
+            idx += take
+        # 中间完整字块（4 的倍数）
+        while n - idx >= 4:
+            chunk = min(n - idx, 0x400 - (pos & 0x3FF))
             chunk -= chunk & 3
             if chunk <= 0:
                 chunk = 4
+            chunk = min(chunk, _DAP_MAX_WRITE_WORDS * 4)   # 固件请求缓冲上限
             self.ap_write(_AP_TAR, pos, ap_sel)
             reqs = [(self._swd_req(True, False, _AP_DRW),
-                     int.from_bytes(pad[off + i:off + i + 4], "little"))
+                     int.from_bytes(payload[idx + i:idx + i + 4], "little"))
                     for i in range(0, chunk, 4)]
             resp, got, _ = self.probe.transfer(self.dap_index, reqs)
             if got < len(reqs) or resp != SWD_ACK_OK:
                 raise DapError(f"内存写 {pos:#x} 失败（ACK={resp:#x}）")
             pos += chunk
-            off += chunk
-        self.ap_write(_AP_CSW, _CSW_32BIT, ap_sel)
+            idx += chunk
+        # 尾字（剩余 1-3 字节）：读-改-写，保护之后的字节
+        if n - idx:
+            hb = bytearray(self.read_mem32(pos, ap_sel).to_bytes(4, "little"))
+            hb[:n - idx] = payload[idx:]
+            self.ap_write(_AP_CSW, _CSW_32BIT | _CSW_AUTO_INC, ap_sel)
+            self.ap_write(_AP_TAR, pos, ap_sel)
+            self.ap_write(_AP_DRW, int.from_bytes(hb, "little"), ap_sel)
 
     def read_idcode(self) -> int:
-        # diag6 实测：完整激活后直接读 IDCODE(0x00) 即可。
-        # 激活后读 CTRL/STAT=0x40 即 READOK 置位（bit6），DP 状态健康；
-        # 实测激活后立即写 ABORT 反而导致后续读 NO_ACK，故不做。
+        """完整 SWD 连接初始化，返回 IDCODE。
+
+        真机实测（DAPLink v0257 WinUSB）必需步骤：
+        1) swd_activate：SWD 线激活（线复位 + JTAG→SWD 切换）；
+        2) 读 IDCODE 确认连接；
+        3) 写 ABORT=0x1E 清除历史 STICKYERR——不清则后续 AP 访问
+           全部 FAULT（旧注释"激活后写 ABORT 导致 NO_ACK"已由真机
+           复测推翻：先读 IDCODE 再写 ABORT 一切正常）；
+        4) power_up：请求调试电源上电并等待 ACK——冷连接/拔插后
+           CDBGPWRUPACK=0，不请求上电则 AP 内存访问全 FAULT；
+        5) 上电过程可能再次置位 STICKYERR，再清一次。
+        """
         self.probe.swd_activate()
-        return self.dp_read(0x00)
+        idcode = self.dp_read(0x00)
+        self.dp_write(0x00, _ABORT_CLEAR_STICKY)   # 清历史 sticky
+        self.power_up()                            # 调试电源上电
+        self.dp_write(0x00, _ABORT_CLEAR_STICKY)   # 上电后再清一次
+        return idcode

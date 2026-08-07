@@ -1,0 +1,6 @@
+{
+  "name": "GD32E230C8T6 (Cortex-M23)",
+  "kernel": "m23",
+  "ram_regions": [[536870912, 536879104]],
+  "desc": "GD32E230C8T6：Cortex-M23 @72MHz，64KB Flash，8KB SRAM @ 0x20000000-0x20001FFF（数据来自用户 Keil 工程 GD32E23x_Project：IRAM(0x20000000,0x2000) IROM(0x08000000,0x10000)，主频来自 system_gd32e23x.c __SYSTEM_CLOCK_72M_PLL_IRC8M_DIV2）"
+}
