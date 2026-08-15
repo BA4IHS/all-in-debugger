@@ -13,8 +13,8 @@ import time
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont, QIntValidator
 from PyQt6.QtWidgets import (
-    QFileDialog, QHBoxLayout, QPlainTextEdit, QRadioButton, QVBoxLayout,
-    QWidget,
+    QFileDialog, QHBoxLayout, QPlainTextEdit, QRadioButton, QSplitter,
+    QVBoxLayout, QWidget,
 )
 
 from qfluentwidgets import (
@@ -61,22 +61,25 @@ class DapPage(QWidget):
         ll.addWidget(self._build_display_card())
         ll.addStretch(1)
         scroll.setWidget(left)
-        scroll.setFixedWidth(316)
+        scroll.setFixedWidth(330)
         scroll.setWidgetResizable(True)
         scroll.enableTransparentBackground()
         scroll.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
-        right = QVBoxLayout()
-        right.setSpacing(8)
-        right.addWidget(self._build_terminal_card(), 1)
-        right.addWidget(self._build_input_card())
+        # 与串口/网络/HID 页一致：接收+发送用可拖动 QSplitter
+        splitter = QSplitter(Qt.Orientation.Vertical, self)
+        splitter.addWidget(self._build_terminal_card())
+        splitter.addWidget(self._build_input_card())
+        splitter.setStretchFactor(0, 4)
+        splitter.setStretchFactor(1, 0)
+        splitter.setChildrenCollapsible(False)
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 40, 0, 0)
         layout.setSpacing(12)
         layout.addWidget(scroll)
-        layout.addLayout(right, 1)
+        layout.addWidget(splitter, 1)
 
         self._connect_signals()
         self._set_connected(False)
@@ -125,7 +128,7 @@ class DapPage(QWidget):
         card = CardWidget()
         v = QVBoxLayout(card)
         v.setContentsMargins(16, 14, 16, 14)
-        v.setSpacing(10)
+        v.setSpacing(8)
         v.addWidget(SubtitleLabel("RTT连接设置", card))
 
         self.dllLabel = CaptionLabel("", card)
@@ -421,7 +424,8 @@ class DapPage(QWidget):
         self.modeCharRadio = QRadioButton("逐字符发送", card)
         self.echoCheck = CheckBox("Echo", card)
         self.sendBtn = PrimaryPushButton("发送", card)
-        self.sendBtn.setFixedWidth(80)
+        # 与其他页发送按钮统一固定宽度
+        self.sendBtn.setFixedWidth(90)
         self.sendBtn.clicked.connect(self._on_send_end)
         h.addWidget(self.sendChCombo)
         h.addWidget(self.sendEdit, 1)

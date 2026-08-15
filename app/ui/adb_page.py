@@ -70,7 +70,7 @@ class AdbPage(QWidget):
 
         # ── 布局：左=连接+命令集；右=终端；底=采集选项细条 ───────
         left = QWidget(self)
-        left.setFixedWidth(340)
+        left.setFixedWidth(330)
         ll = QVBoxLayout(left)
         ll.setContentsMargins(0, 0, 0, 0)
         ll.setSpacing(12)
@@ -106,7 +106,7 @@ class AdbPage(QWidget):
         card = CardWidget(self)
         v = QVBoxLayout(card)
         v.setContentsMargins(16, 14, 16, 14)
-        v.setSpacing(10)
+        v.setSpacing(8)
         v.addWidget(SubtitleLabel("ADB 连接", card))
 
         self.serialCombo = ComboBox(card)

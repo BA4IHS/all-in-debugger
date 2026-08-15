@@ -20,7 +20,7 @@ from qfluentwidgets import (
     BodyLabel, CaptionLabel, CardWidget, CheckBox, ComboBox, FluentIcon,
     InfoBar, LineEdit, PrimaryPushButton, PushButton,
     SingleDirectionScrollArea, SpinBox, SubtitleLabel, SwitchButton,
-    TableWidget, ToolButton,
+    TableWidget, TogglePushButton, ToolButton,
 )
 
 from app import serial_utils as su
@@ -60,7 +60,7 @@ class HidPage(QWidget):
         ll.addWidget(self._build_template_card())
         ll.addStretch(1)
         scroll.setWidget(left)
-        scroll.setFixedWidth(340)
+        scroll.setFixedWidth(330)
         scroll.setWidgetResizable(True)
         scroll.enableTransparentBackground()
         scroll.setHorizontalScrollBarPolicy(
@@ -90,7 +90,7 @@ class HidPage(QWidget):
         card = CardWidget()
         v = QVBoxLayout(card)
         v.setContentsMargins(16, 14, 16, 14)
-        v.setSpacing(10)
+        v.setSpacing(8)
         v.addWidget(SubtitleLabel("HID 设备", card))
 
         self.dllLabel = CaptionLabel("", card)
@@ -202,7 +202,7 @@ class HidPage(QWidget):
         self.tplTable = TableWidget(card)
         self.tplTable.setColumnCount(5)
         self.tplTable.setRowCount(0)
-        # 表头缩短以适配 340px 左栏，避免表格横向滚动截断内容
+        # 表头缩短以适配 330px 左栏，避免表格横向滚动截断内容
         self.tplTable.setHorizontalHeaderLabels(
             ["✓", "名称", "HEX", "延时", "重复"])
         hh = self.tplTable.horizontalHeader()
@@ -280,11 +280,6 @@ class HidPage(QWidget):
         bar = QHBoxLayout()
         bar.addWidget(SubtitleLabel("接收", card))
         bar.addStretch(1)
-        self.hexSendSwitch = SwitchButton(card)
-        self.hexSendSwitch.setOnText("HEX 发送")
-        self.hexSendSwitch.setOffText("文本发送")
-        self.hexSendSwitch.setChecked(True)
-        bar.addWidget(self.hexSendSwitch)
         self.autoRidCheck = CheckBox("自动补报告 ID 0x00", card)
         # 默认不补：带编号报告的设备（报告 ID 非 0）补 0x00 反而触发
         # WriteFile 0x57 参数错误；写入失败时底层会自动换形式重试
@@ -323,12 +318,24 @@ class HidPage(QWidget):
         self.sendEdit = LineEdit(card)
         self.sendEdit.setPlaceholderText("HEX：首字节为报告 ID + 数据")
         self.sendEdit.returnPressed.connect(self._on_send)
+        # 与串口/网络页发送行一致的 HEX 切换按钮
+        self.hexSendSwitch = TogglePushButton("HEX", card)
+        self.hexSendSwitch.setFixedWidth(64)
+        self.hexSendSwitch.setChecked(True)
+        self.hexSendSwitch.toggled.connect(self._on_hex_mode_changed)
         self.sendBtn = PrimaryPushButton("发送", card)
         self.sendBtn.setFixedWidth(90)
         self.sendBtn.clicked.connect(self._on_send)
         h.addWidget(self.sendEdit, 1)
+        h.addWidget(self.hexSendSwitch)
         h.addWidget(self.sendBtn)
         return card
+
+    def _on_hex_mode_changed(self, on: bool):
+        """HEX/文本发送模式切换：同步输入框占位提示。"""
+        self.sendEdit.setPlaceholderText(
+            "HEX：首字节为报告 ID + 数据" if on
+            else "文本内容（按 UTF-8 发送）")
 
     # ── 信号接线 ───────────────────────────────────────────────
 

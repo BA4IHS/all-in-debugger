@@ -1,0 +1,48 @@
+Nuitka-Options: Used command line options:
+Nuitka-Options:   --standalone --output-dir=C:\Users\admin\Desktop\comz\com-3.8-f\dist --output-filename=all-in-debugger.exe --enable-plugin=pyqt6 --include-package=pydantic --include-package=mcp --include-package-data=qfluentwidgets --include-data-dir=app/libs=app/libs --include-data-dir=app/assets=app/assets --include-data-dir=app/adb_profiles=app/adb_profiles --include-data-files=app/hid_templates.json=app/hid_templates.json --nofollow-import-to=tests --nofollow-import-to=numpy,scipy,PIL,colorthief --windows-console-mode=disable --lto=yes --noinclude-qt-plugins=tls --noinclude-qt-translations --company-name=BA4IHS --product-name=all-in-debugger --file-version=1.2.0 --file-description="一站式硬件调试工具集（串口/ADB/HID/DAP-RTT/Modbus/SSH/TCP-IP，内嵌 MCP 服务）" --copyright="Copyright (C) 2026 BA4IHS (GPLv3)" --remove-output --assume-yes-for-downloads ~\Desktop\comz\com-3.8-f\main.py
+Nuitka-Plugins:pyqt6: Support for PyQt6 is not perfect, e.g. Qt threading does not work, so prefer PySide6 if you can.
+Nuitka: Starting Python compilation with:
+Nuitka:   Version '4.1.3' on Python 3.10 (flavor 'CPython Official') commercial grade 'not installed'.
+Nuitka-Plugins:pyqt6: Including Qt plugins 'iconengines,imageformats,platforms,styles' below 'PyQt6\Qt6\plugins'.
+Nuitka-Inclusion: Including Windows Runtime DLLs, which increases distribution size. Use '--include-windows-runtime-dlls=no' to disable, or make explicit with '--include-windows-runtime-dlls=yes'.
+Nuitka: Completed Python level compilation and optimization.
+Nuitka: Generating source code for C backend compiler.
+Nuitka: Running data composer tool for optimal constant value handling.
+Nuitka: Running C compilation via Scons.
+Nuitka-Scons: Backend C compiler: cl (cl 14.5).
+Nuitka-Scons: Backend C linking with 1354 files (no progress information available for this stage).
+Nuitka-Scons: Running 'link @C:\\Users\\admin\\AppData\\Local\\Temp\\tmpntr7r_pd.lnk' took 576.96 seconds
+Nuitka-Scons: Compiled 1354 C files using clcache with 1354 cache hits and 0 cache misses.
+Nuitka-Options: Included data file 'app\hid_templates.json' due to specified data file 'app/hid_templates.json=app/hid_templates.json' on command line.
+Nuitka-Options: Included data file 'app\libs\README.txt' due to specified data dir 'app\libs' on command line.
+Nuitka-Options: Included data file 'app\assets\android.svg' due to specified data dir 'app\assets' on command line.
+Nuitka-Options: Included data file 'app\assets\android_white.svg' due to specified data dir 'app\assets' on command line.
+Nuitka-Options: Included data file 'app\adb_profiles\T153_tina.json' due to specified data dir 'app\adb_profiles' on command line.
+Nuitka-Options: Included data file 'app\adb_profiles\T153_tina_指令表.md' due to specified data dir 'app\adb_profiles' on command line.
+Nuitka-Options: Included data file 'app\adb_profiles\generic_linux.json' due to specified data dir 'app\adb_profiles' on command line.
+Nuitka-Plugins:data-files: Included data file 'certifi\cacert.pem' due to package data for 'certifi'.
+Nuitka-Plugins:data-files: Included 20 data files due to package data directory 'schemas' for 'jsonschema_specifications'.
+Nuitka-Plugins:data-files: Included 604 data files due to package data directory '.' for 'tzdata.zoneinfo'.
+Nuitka: Removing build directory 'C:\Users\admin\Desktop\comz\com-3.8-f\dist\main.build'.
+Nuitka: Successfully created '~\Desktop\comz\com-3.8-f\dist\main.dist\all-in-debugger.exe'.
+[build] 娓呯悊鏃т骇鐗?C:\Users\admin\Desktop\comz\com-3.8-f\dist\main.dist
+[build] 寮€濮?Nuitka 鎵撳寘锛堥娆＄害 10-30 鍒嗛挓锛岃鑰愬績绛夊緟锛?..
+[build] 缂栬瘧瀹屾垚锛欳:\Users\admin\Desktop\comz\com-3.8-f\dist\main.dist
+[build] 瑁佸壀 Qt 鎻掍欢锛歩mageformats/qgif.dll (46 KB)
+[build] 瑁佸壀 Qt 鎻掍欢锛歩mageformats/qicns.dll (54 KB)
+[build] 瑁佸壀 Qt 鎻掍欢锛歩mageformats/qpdf.dll (41 KB)
+[build] 瑁佸壀 Qt 鎻掍欢锛歩mageformats/qtga.dll (37 KB)
+[build] 瑁佸壀 Qt 鎻掍欢锛歩mageformats/qtiff.dll (431 KB)
+[build] 瑁佸壀 Qt 鎻掍欢锛歩mageformats/qwbmp.dll (35 KB)
+[build] 瑁佸壀 Qt 鎻掍欢锛歩mageformats/qwebp.dll (549 KB)
+[build] 瑁佸壀 Qt 鎻掍欢锛歱latforms/qminimal.dll (60 KB)
+[build] Qt 鎻掍欢瑁佸壀瀹屾垚锛屽叡绉婚櫎 8 涓枃浠?
+[build] 瑁佸壀 Qt 搴擄細qt6pdf.dll (4503 KB)
+[build] 瑁佸壀 Qt 搴擄細qt6network.dll (1729 KB)
+[build] Qt 搴撹鍓畬鎴愶紝鍏辩Щ闄?2 涓枃浠?
+[build] 閰嶇疆妫€鏌ワ細浜х墿涓棤 config.json/data.json锛圡CP 瀵嗛挜涓嶆墦鍖咃級鉁?
+[build] 瀛愮郴缁熸鏌ワ細Subsystem=2 (WINDOWS_GUI锛堟棤缁堢锛夆湏)锛?=GUI锛?=Console锛?
+[build] libs 瀹屾暣鎬э細宸蹭粠婧愮爜澶嶅埗 app/libs 鍒颁骇鐗╋紙6 椤癸級
+[build] 渚濊禆妫€鏌ワ細HID/ADB 鍘熺敓渚濊禆榻愬叏锛? 椤癸級鉁?
+[build] 7z 鍘嬬缉 -> C:\Users\admin\Desktop\comz\com-3.8-f\dist\all-in-debugger-x64-1.2.0.7z
+[build] 褰掓。瀹屾垚锛欳:\Users\admin\Desktop\comz\com-3.8-f\dist\all-in-debugger-x64-1.2.0.7z

@@ -60,6 +60,7 @@ class ConnectPanel(QWidget):
         card = CardWidget(self)
         v = QVBoxLayout(card)
         v.setContentsMargins(16, 14, 16, 14)
+        v.setSpacing(8)
         v.addWidget(SubtitleLabel("连接", card))
 
         form = QFormLayout()

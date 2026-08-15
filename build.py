@@ -28,6 +28,14 @@ import subprocess
 import sys
 from pathlib import Path
 
+# Windows 下经管道（如 Tee-Object）重定向 stdout 时，Python 会按 GBK 编码输出，
+# 打印 ✓ 等非 GBK 字符会抛 UnicodeEncodeError 中断打包。强制 UTF-8 输出。
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except (AttributeError, ValueError):
+    pass  # 旧版 Python 无 reconfigure，忽略
+
 ROOT = Path(__file__).resolve().parent
 ENTRY = ROOT / "main.py"
 VERSION = "1.2.0"
@@ -185,6 +193,24 @@ REQUIRED_LIBS = [
 ]
 
 
+def ensure_libs_copied():
+    """把 app/libs 整目录强制复制进产物。
+
+    Nuitka 的 --include-data-dir 对含子目录/二进制的 libs 目录复制不完整
+    （实测只带出 README.txt，丢 hidapi.dll 和 adb\ 子目录），这里编译后
+    直接从源码目录整体复制兜底，保证 HID/ADB 原生依赖一定进产物。
+    """
+    src = ROOT / "app" / "libs"
+    dst = BUNDLE_DIR / "app" / "libs"
+    if not src.is_dir():
+        print(f"[build] 警告：源码目录 {src} 不存在，无法复制 libs", file=sys.stderr)
+        return False
+    shutil.copytree(src, dst, dirs_exist_ok=True)
+    n = sum(1 for _ in dst.rglob("*"))
+    print(f"[build] libs 完整性：已从源码复制 app/libs 到产物（{n} 项）")
+    return True
+
+
 def check_libs_complete():
     """防御检查：确认 HID/ADB 原生依赖已进入产物（缺失会静默失败，必须显式暴露）。"""
     missing = []
@@ -267,6 +293,7 @@ def main():
     if not check_gui_subsystem():
         print("[build] 警告：exe 存在控制台窗口风险，请检查 --windows-console-mode",
               file=sys.stderr)
+    ensure_libs_copied()
     if not check_libs_complete():
         print("[build] 警告：产物缺少 HID/ADB 原生依赖，归档将不完整！",
               file=sys.stderr)

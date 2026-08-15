@@ -58,6 +58,8 @@ class SendPanel(QWidget):
         self.newlineCombo.setToolTip("文本模式下追加的换行符（HEX 模式忽略）")
 
         self.sendBtn = PrimaryPushButton(FluentIcon.SEND, "发送", self)
+        # 与 HID / DAP 页发送按钮统一固定宽度
+        self.sendBtn.setFixedWidth(90)
         self.sendBtn.clicked.connect(self._send)
 
         inputRow.addWidget(self.input, 1)

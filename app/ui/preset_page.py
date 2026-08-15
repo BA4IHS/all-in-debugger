@@ -97,7 +97,7 @@ class PresetPage(QWidget):
         self._rows: list = []
 
         v = QVBoxLayout(self)
-        v.setContentsMargins(10, 60, 0, 0)  # 顶部留白避开悬浮标题栏
+        v.setContentsMargins(12, 60, 12, 0)  # 顶部留白避开悬浮标题栏
         v.setSpacing(12)
 
         # 工具条

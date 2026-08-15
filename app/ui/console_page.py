@@ -35,7 +35,7 @@ class ConsolePage(QWidget):
         # ── 布局 ────────────────────────────────────────────────
         scroll = SingleDirectionScrollArea(self)
         scroll.setWidget(self.connectPanel)
-        scroll.setFixedWidth(316)
+        scroll.setFixedWidth(330)
         scroll.setWidgetResizable(True)
         # 官方透明化：透出窗口主题底色，深色模式下半透明白卡片才显深色
         scroll.enableTransparentBackground()
