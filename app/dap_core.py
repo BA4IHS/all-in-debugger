@@ -59,6 +59,14 @@ _AP_TAR = 0x04
 _AP_DRW = 0x0C
 
 _CSW_32BIT = 0x02
+# PPB 调试寄存器（DHCSR 0xE000EDF0 等）须特权 AHB-AP 访问，否则被
+# 目标拒绝（AP 写 0xC ACK=0x4）。真机实测（STM32F103 + DAPLink HID）：
+# CSW.SPROT(bit8) 被目标 AHB-AP 忽略——写 0x102 读回 0x01000042
+# （bit8 丢失、bit24/bit6 恒 1），PPB 访问仍 FAULT；必须用
+# HPROT(0x23000000, bit29/25/24)。0x23000052 为真机验证通过值
+# （HPROT|32位|AUTO_INC|0x40，写 DHCSR halt ACK=OK），其中 bit4
+# (0x10) 即 AUTO_INC，单字访问时无副作用。
+_CSW_PRIV = 0x23000052
 _CSW_AUTO_INC = 0x10
 
 # ABORT 寄存器（DP 0x00 写）：置位各位清除对应 sticky 错误
@@ -72,6 +80,13 @@ _ABORT_CLEAR_STICKY = 0x1E
 #   14 字 73B 失败）。超限必须分多次 transfer，不能依赖 255 上限。
 _DAP_MAX_READ_WORDS = 15
 _DAP_MAX_WRITE_WORDS = 13
+
+# CMSIS-DAP v1 HID 报告数据长度（不含报告 ID 字节；含报告 ID 为 65 字节）。
+# 实测 DAPLink v0257 的 DAP_Info(0xFE) 返回 packet size=16（逻辑包长），
+# 但 HID 物理报告固定 64 字节数据：短读会截断大响应（DAP_Transfer 63B
+# 只取前 17B）且剩余字节缓存在 hidapi 内部导致后续响应错乱。HID 传输
+# 必须始终按 65 字节完整报告读写，忽略固件声称的 packet size。
+_HID_REPORT_SIZE = 64
 
 # DP CTRL/STAT 电源位（ARM ADIv5 规范）
 _CDBGPWRUPREQ = 0x40000000   # bit30 调试电源请求
@@ -257,11 +272,13 @@ class DapProbe:
 
     def close(self) -> None:
         # 关闭前通知固件断开端口，清理连接状态；
-        # 未读响应残留由下次打开时的 drain 处理
+        # 未读响应残留由下次打开时的 drain 处理。
+        # close 必须是纯清理操作：任何传输异常都不允许外泄
+        # （否则 requestOpen 的 except DapError 分支会再次抛异常打崩线程）
         if self.opened:
             try:
                 self.disconnect()
-            except DapError:
+            except Exception:
                 pass
         if self._hid is not None:
             self._hid.close()
@@ -281,12 +298,24 @@ class DapProbe:
         raise DapError("调试器未打开")
 
     def _exchange_hid(self, req: bytes) -> bytes:
+        # CMSIS-DAP v1 HID 报告固定 65 字节（报告 ID 0 + 64 数据）。
+        # 不能按 self.packet_size 缩短：packet_size 取自固件 DAP_Info(0xFE)
+        # （DAPLink 实测返回 16），短读会截断 DAP_Transfer 等大响应并在
+        # hidapi 内部残留缓存，导致后续响应错乱；必须读写完整报告。
         payload = b"\x00" + req
-        if len(payload) < self.packet_size + 1:
-            payload += b"\x00" * (self.packet_size + 1 - len(payload))
-        self._hid.write(payload)
-        data = self._hid.read(self.packet_size + 1, timeout_ms=500)
-        # hidapi 读回已不含报告 ID，首字节即命令回显，整体返回
+        if len(payload) < _HID_REPORT_SIZE + 1:
+            payload += b"\x00" * (_HID_REPORT_SIZE + 1 - len(payload))
+        try:
+            self._hid.write(payload)
+            data = self._hid.read(_HID_REPORT_SIZE + 1, timeout_ms=500)
+        except native.NativeError as e:
+            # 传输层原始异常必须转 DapError：上层（requestOpen/轮询/复位）
+            # 只捕获 DapError。原生错误（如连接失败后设备句柄失效的
+            # WriteFile 0x1 ERROR_INVALID_FUNCTION）漏出会打崩 worker
+            # 线程（PyQt6 槽内未捕获异常 → 线程终止，应用报错退出）
+            raise DapError(f"HID 传输失败：{e}")
+        # hidapi 读回完整报告（实测首字节即 DAP 命令回显，无报告 ID 前缀），
+        # 与 WinUSB 短包响应同一数据格式，调用方按 rsp[0..n] 解析兼容
         return bytes(data) if data else b""
 
     def _exchange_winusb(self, req: bytes) -> bytes:
@@ -294,20 +323,23 @@ class DapProbe:
         payload = bytes(req)
         if len(payload) < self.packet_size:
             payload += b"\x00" * (self.packet_size - len(payload))
-        self._winusb.write(payload)
-        # 大响应（如内存批量读）跨多个 bulk 包。实测（DAPLink v0257）：
-        # WinUSB 驱动不会聚合多包，单次 ReadPipe 读大 buffer 会
-        # err=31 失败；必须按 packet_size 逐包读，直到读回短包
-        # （长度 < packet_size）即传输结束。响应长度恒为 3+4n，
-        # 永非 64 的倍数，故必有短包收尾（不靠超时误判）。
-        total = bytearray()
-        for _ in range(64):     # 上限防护（最大响应 3+4*255≈1KB）
-            chunk = self._winusb.read(self.packet_size)
-            if not chunk:
-                break           # 管道超时返回空 → 传输结束
-            total += chunk
-            if len(chunk) < self.packet_size:
-                break           # 短包 → 传输结束
+        try:
+            self._winusb.write(payload)
+            # 大响应（如内存批量读）跨多个 bulk 包。实测（DAPLink v0257）：
+            # WinUSB 驱动不会聚合多包，单次 ReadPipe 读大 buffer 会
+            # err=31 失败；必须按 packet_size 逐包读，直到读回短包
+            # （长度 < packet_size）即传输结束。响应长度恒为 3+4n，
+            # 永非 64 的倍数，故必有短包收尾（不靠超时误判）。
+            total = bytearray()
+            for _ in range(64):     # 上限防护（最大响应 3+4*255≈1KB）
+                chunk = self._winusb.read(self.packet_size)
+                if not chunk:
+                    break           # 管道超时返回空 → 传输结束
+                total += chunk
+                if len(chunk) < self.packet_size:
+                    break           # 短包 → 传输结束
+        except native.NativeError as e:
+            raise DapError(f"WinUSB 传输失败：{e}")
         return bytes(total)
 
     def _query_packet_size(self):
@@ -316,6 +348,12 @@ class DapProbe:
             if len(rsp) >= 4 and rsp[0] == DAP_INFO:
                 size = int.from_bytes(rsp[2:4], "little")
                 if 16 <= size <= 4096:
+                    # HID 传输物理报告长度固定 64 字节（CMSIS-DAP v1），
+                    # 固件 DAP_Info(0xFE) 返回值（DAPLink 实测 16）是逻辑
+                    # 包长，用于 HID 会把大响应截断为 17 字节；必须忽略。
+                    # WinUSB 为分包循环读（短包结束），不受影响。
+                    if self.transport == "hid":
+                        size = _HID_REPORT_SIZE
                     self.packet_size = size
         except DapError:
             pass
@@ -334,9 +372,11 @@ class DapProbe:
         return rsp[1]
 
     def disconnect(self):
+        # 断开是尽力而为：设备已失效/句柄陈旧时交换本身会失败，
+        # 一律吞掉，绝不能抛出（close 路径不允许抛异常）
         try:
             self.exchange(bytes([DAP_DISCONNECT]))
-        except DapError:
+        except Exception:
             pass
 
     def set_clock(self, hz: int):
@@ -508,7 +548,9 @@ class SwdTarget:
     # ── 内存访问 ───────────────────────────────────────────────
 
     def _setup_mem(self, ap_sel: int = 0):
-        self.ap_write(_AP_CSW, _CSW_32BIT, ap_sel)
+        # 特权 CSW（HPROT）：PPB 调试寄存器（DHCSR/AIRCR）非特权访问
+        # 会被拒；真机实测 SPROT(bit8) 无效，须用 HPROT(0x23000052)
+        self.ap_write(_AP_CSW, _CSW_PRIV, ap_sel)
 
     def read_mem32(self, addr: int, ap_sel: int = 0) -> int:
         self._setup_mem(ap_sel)
@@ -537,7 +579,7 @@ class SwdTarget:
         """
         if count <= 0:
             return b""
-        self.ap_write(_AP_CSW, _CSW_32BIT | _CSW_AUTO_INC, ap_sel)
+        self.ap_write(_AP_CSW, _CSW_PRIV, ap_sel)
         out = bytearray()
         pos = addr & 0xFFFFFFFC                    # 起始字对齐（向下）
         end = addr + count
@@ -559,7 +601,7 @@ class SwdTarget:
                 out += v.to_bytes(4, "little")
             pos += chunk
             remain -= chunk
-        self.ap_write(_AP_CSW, _CSW_32BIT, ap_sel)
+        self.ap_write(_AP_CSW, _CSW_PRIV, ap_sel)
         head = addr - (addr & 0xFFFFFFFC)
         return bytes(out[head:head + count])
 
@@ -573,7 +615,7 @@ class SwdTarget:
         if not data:
             return
         payload = bytes(data)
-        self.ap_write(_AP_CSW, _CSW_32BIT | _CSW_AUTO_INC, ap_sel)
+        self.ap_write(_AP_CSW, _CSW_PRIV, ap_sel)
         pos = addr & 0xFFFFFFFC
         off = addr - pos                             # 首字内偏移 0..3
         idx = 0
@@ -583,7 +625,7 @@ class SwdTarget:
             take = min(4 - off, n)
             hb = bytearray(self.read_mem32(pos, ap_sel).to_bytes(4, "little"))
             hb[off:off + take] = payload[:take]
-            self.ap_write(_AP_CSW, _CSW_32BIT | _CSW_AUTO_INC, ap_sel)
+            self.ap_write(_AP_CSW, _CSW_PRIV, ap_sel)
             self.ap_write(_AP_TAR, pos, ap_sel)
             self.ap_write(_AP_DRW, int.from_bytes(hb, "little"), ap_sel)
             pos += 4
@@ -608,7 +650,7 @@ class SwdTarget:
         if n - idx:
             hb = bytearray(self.read_mem32(pos, ap_sel).to_bytes(4, "little"))
             hb[:n - idx] = payload[idx:]
-            self.ap_write(_AP_CSW, _CSW_32BIT | _CSW_AUTO_INC, ap_sel)
+            self.ap_write(_AP_CSW, _CSW_PRIV, ap_sel)
             self.ap_write(_AP_TAR, pos, ap_sel)
             self.ap_write(_AP_DRW, int.from_bytes(hb, "little"), ap_sel)
 

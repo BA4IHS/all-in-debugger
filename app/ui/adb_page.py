@@ -185,7 +185,8 @@ class AdbPage(QWidget):
     def _build_command_card(self) -> QWidget:
         sec = QWidget(self)
         v = QVBoxLayout(sec)
-        v.setContentsMargins(0, 0, 0, 0)
+        # 左边距与上方"ADB 连接"卡对齐，让"命令集"文字离窗口左边框更远
+        v.setContentsMargins(16, 0, 0, 0)
         v.setSpacing(8)
 
         # 标题行：大号标题 + 搜索/保存/清屏 工具按钮

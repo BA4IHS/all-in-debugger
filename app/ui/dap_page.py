@@ -8,10 +8,11 @@
 
 传输经 hidapi.dll USB HID 直连 CMSIS-DAP 调试器，无需厂商 DLL。
 """
+import re
 import time
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QFont, QIntValidator
+from PyQt6.QtGui import QBrush, QColor, QFont, QIntValidator, QTextCharFormat
 from PyQt6.QtWidgets import (
     QFileDialog, QHBoxLayout, QPlainTextEdit, QRadioButton, QSplitter,
     QVBoxLayout, QWidget,
@@ -33,6 +34,29 @@ from app.ui.console_style import setup_log_view
 
 MAX_CHARS = 400_000
 
+# ---------------------------------------------------------------------------
+# ANSI SGR 彩色支持（SEGGER RTT RTT_CTRL_* 转义码）
+#
+# SEGGER RTT.h 定义的转义序列（RTT Viewer 同款）：
+#   \x1b[2;3Xm  普通前景（RTT_CTRL_TEXT_*）      \x1b[1;3Xm  亮前景（BRIGHT_*）
+#   \x1b[24;4Xm 普通背景（RTT_CTRL_BG_*）        \x1b[4;4Xm  亮背景（BRIGHT_*）
+#   \x1b[0m     复位（RTT_CTRL_RESET）
+# 注意：标准 ANSI 中 4 是下划线，SEGGER 借用作亮背景标记，此处按亮背景处理。
+# ---------------------------------------------------------------------------
+_ANSI_ESC_RE = re.compile(r"\x1b\[[0-9;]*m")
+_ANSI_INCOMPLETE_RE = re.compile(r"\x1b\[[0-9;]*$")   # 尾部未闭合序列（跨块）
+_ANSI_STRIP_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")  # 日志保存时剥离全部 CSI
+
+# 复用终端 16 色调色板（VSCode 风格），SGR 色号 30-37/90-97 前景、40-47/100-107 背景
+from app.ui.terminal_widget import PALETTE as _TERM_PAL
+_SGR_BASE = [_TERM_PAL["black"], _TERM_PAL["red"], _TERM_PAL["green"],
+             _TERM_PAL["brown"], _TERM_PAL["blue"], _TERM_PAL["magenta"],
+             _TERM_PAL["cyan"], _TERM_PAL["white"]]
+_SGR_BRIGHT = [_TERM_PAL["brightblack"], _TERM_PAL["brightred"],
+               _TERM_PAL["brightgreen"], _TERM_PAL["brightbrown"],
+               _TERM_PAL["brightblue"], _TERM_PAL["brightmagenta"],
+               _TERM_PAL["brightcyan"], _TERM_PAL["brightwhite"]]
+
 
 class DapPage(QWidget):
 
@@ -43,10 +67,16 @@ class DapPage(QWidget):
         self._channels = []          # rttFound 后的通道列表
         self._max_up = 0             # 固件实际 UP 通道数（描述符个数）
         self._max_down = 0           # 固件实际 DOWN 通道数
-        self._all_buf = ""           # "所有通道" 模式视图缓冲（带 [编号]-> 前缀）
-        self._buffers = {}           # 通道编号 → 文本缓冲
+        self._all_buf = ""           # "所有通道" 模式视图缓冲（带 [编号]-> 前缀，保留 ANSI）
+        self._buffers = {}           # 通道编号 → 文本缓冲（保留 ANSI 转义码）
         self._rx = 0
         self._tx = 0
+        # ANSI SGR 流式解析状态（跨数据块累积）
+        self._ansi_pending = ""     # 未完成的转义序列
+        self._ansi_fmt = QTextCharFormat()   # 当前生效的字符格式
+        self._ansi_fg = None         # 当前前景 RGB 或 None（默认）
+        self._ansi_bg = None         # 当前背景 RGB 或 None（默认）
+        self._ansi_bold = False      # 当前粗体
         self._chip_items = []        # [(stem, name, data), ...] 芯片包列表
         self._active_chip = None     # 当前选中的芯片包数据
         self._clock_touched = False  # 用户手动改过 SWD 速度则不再被芯片包覆盖
@@ -177,7 +207,7 @@ class DapPage(QWidget):
         v.addWidget(BodyLabel("芯片 / 内核", card))
         v.addLayout(krow)
 
-        self.resetCheck = CheckBox("连接后硬件复位", card)
+        self.resetCheck = CheckBox("连接后复位（软+硬）", card)
         v.addWidget(self.resetCheck)
 
         brow = QHBoxLayout()
@@ -186,7 +216,9 @@ class DapPage(QWidget):
         self.closeBtn.setEnabled(False)
         self.resetBtn = PushButton("复位", card)
         self.resetBtn.setEnabled(False)
-        self.resetBtn.setToolTip("硬件复位目标（需连接 RESET 线），保持 SWD/RTT 连接")
+        self.resetBtn.setToolTip(
+            "双重复位目标：软复位（AIRCR SYSRESETREQ，无需 RESET 线）"
+            "+ 硬复位（nRESET），复位后自动重连 SWD 保持 RTT")
         brow.addWidget(self.openBtn, 1)
         brow.addWidget(self.closeBtn, 1)
         brow.addWidget(self.resetBtn, 1)
@@ -448,6 +480,9 @@ class DapPage(QWidget):
         w.errorOccurred.connect(
             lambda msg: InfoBar.error(title="DAP/RTT 错误", content=msg,
                                       duration=6000, parent=self.rxView))
+        w.resetWarned.connect(
+            lambda msg: InfoBar.warning(title="复位提示", content=msg,
+                                        duration=6000, parent=self.rxView))
         w.resetDone.connect(self._on_reset_done)
         self.openBtn.clicked.connect(self._on_open)
         self.closeBtn.clicked.connect(lambda _=False: self.dt.sigClose.emit())
@@ -539,6 +574,12 @@ class DapPage(QWidget):
 
     def _on_probe_opened(self, idcode_str: str):
         self.statusLabel.setText(f"SWD 已连接  {idcode_str}\n正在查找 RTT 控制块…")
+        # 打开即允许断开/复位：RTT 未找到/解析失败等路径不会卡死按钮，
+        # 连接不可用时直接点「断开」重置（probe 在 worker 内关闭）即可
+        # 重新连接，无需重启软件
+        self.openBtn.setEnabled(False)
+        self.closeBtn.setEnabled(True)
+        self.resetBtn.setEnabled(True)
 
     def _on_open_failed(self, msg: str):
         self.openBtn.setEnabled(True)
@@ -550,6 +591,9 @@ class DapPage(QWidget):
         self._max_down = rtt["max_down"]
         self._buffers = {}
         self._all_buf = ""
+        self._reset_ansi()
+        self._ansi_pending = ""
+        self.rxView.clear()
         self._set_connected(True)
         # 通道选择固定 0-15 共 16 槽位；查看框顶部加 "所有通道"
         self._fill_channel_combo(self.chCombo, self._channels, "UP",
@@ -598,9 +642,93 @@ class DapPage(QWidget):
             self._all_buf = ""
 
     def _on_reset_done(self):
-        self.statusLabel.setText("目标已硬件复位（RTT 连接保持）")
-
+        self.statusLabel.setText("目标已复位（S_RESET_ST 确认，RTT 连接保持）")
     # ── 通道视图 ───────────────────────────────────────────────
+
+    # ── ANSI SGR 彩色解析（SEGGER RTT RTT_CTRL_* 转义码）──────
+
+    def _reset_ansi(self):
+        """颜色状态恢复默认（前景/背景/粗体全部复位）。"""
+        self._ansi_fg = None
+        self._ansi_bg = None
+        self._ansi_bold = False
+        self._ansi_fmt = QTextCharFormat()
+
+    def _sync_fmt(self):
+        """按当前 fg/bg/bold 状态重建 QTextCharFormat。"""
+        self._ansi_fmt = QTextCharFormat()
+        if self._ansi_fg:
+            self._ansi_fmt.setForeground(QBrush(QColor(*self._ansi_fg)))
+        if self._ansi_bg:
+            self._ansi_fmt.setBackground(QBrush(QColor(*self._ansi_bg)))
+        if self._ansi_bold:
+            self._ansi_fmt.setFontWeight(QFont.Weight.Bold)
+
+    def _apply_sgr(self, seq: str):
+        """应用一条 SGR 序列（如 \x1b[2;31m）到当前颜色状态。"""
+        nums = [int(x) for x in seq[2:-1].split(";") if x]
+        bright_bg = False          # SEGGER 用 \x1b[4;4Xm 标记亮背景
+        for n in nums:
+            if n == 0:             # RTT_CTRL_RESET
+                self._reset_ansi()
+            elif n == 1:           # 亮色标记（RTT_CTRL_TEXT_BRIGHT_*）
+                self._ansi_bold = True
+            elif n == 2:           # 暗淡：基础 8 色本身即暗，无需处理
+                pass
+            elif n == 4:           # SEGGER 亮背景标记（标准 ANSI 是下划线）
+                bright_bg = True
+            elif n == 22:
+                self._ansi_bold = False
+            elif 30 <= n <= 37:
+                self._ansi_fg = (_SGR_BRIGHT if self._ansi_bold
+                                 else _SGR_BASE)[n - 30]
+            elif 90 <= n <= 97:
+                self._ansi_fg = _SGR_BRIGHT[n - 90]
+            elif 40 <= n <= 47:
+                self._ansi_bg = (_SGR_BRIGHT if bright_bg
+                                 else _SGR_BASE)[n - 40]
+            elif 100 <= n <= 107:
+                self._ansi_bg = _SGR_BRIGHT[n - 100]
+            elif n == 39:
+                self._ansi_fg = None
+            elif n == 49:
+                self._ansi_bg = None
+        self._sync_fmt()
+
+    def _feed_rx_rich(self, text: str):
+        """流式解析 ANSI SGR 并富文本插入 rxView（跨数据块维护状态）。"""
+        text = self._ansi_pending + text
+        self._ansi_pending = ""
+        im = _ANSI_INCOMPLETE_RE.search(text)
+        if im:
+            self._ansi_pending = im.group(0)   # 尾部未闭合序列留待下块
+            text = text[:im.start()]
+        pos = 0
+        for m in _ANSI_ESC_RE.finditer(text):
+            if m.start() > pos:
+                self.rxView.setCurrentCharFormat(self._ansi_fmt)
+                self.rxView.insertPlainText(text[pos:m.start()])
+            self._apply_sgr(m.group(0))
+            pos = m.end()
+        if pos < len(text):
+            self.rxView.setCurrentCharFormat(self._ansi_fmt)
+            self.rxView.insertPlainText(text[pos:])
+
+    def _rebuild_view(self, text: str):
+        """清屏并按缓冲重放富文本（通道切换/超长截断时重建）。"""
+        self.rxView.clear()
+        self._ansi_pending = ""
+        self._reset_ansi()
+        self._feed_rx_rich(text)
+
+    @staticmethod
+    def _trim_buf(buf: str) -> str:
+        """缓冲超长截断：切点回退到最近转义序列开头，避免残留半个 ANSI 码。"""
+        cut = len(buf) - MAX_CHARS // 2
+        i = buf.rfind("\x1b", cut - 32, cut)
+        if i > 0:
+            cut = i
+        return buf[cut:]
 
     def _current_channel(self) -> str:
         return str(self.chCombo.currentData() or "")
@@ -612,7 +740,7 @@ class DapPage(QWidget):
             text = self._all_buf or self._all_view_text()
         else:
             text = self._buffers.get(cur, "")
-        self.rxView.setPlainText(text)
+        self._rebuild_view(text)   # 富文本重建（重放 ANSI 转义码上色）
         sb = self.rxView.verticalScrollBar()
         sb.setValue(sb.maximum())
 
@@ -632,6 +760,8 @@ class DapPage(QWidget):
                 self._buffers.pop(str(i), None)
         else:
             self._buffers[self._current_channel()] = ""
+        self._reset_ansi()
+        self._ansi_pending = ""
         self.rxView.clear()
         # 清屏同时清零收发统计（右上角 RX/TX 计数）
         self._rx = 0
@@ -657,7 +787,7 @@ class DapPage(QWidget):
             return
         try:
             with open(path, "w", encoding="utf-8", newline="") as f:
-                f.write(text)
+                f.write(_ANSI_STRIP_RE.sub("", text))   # 保存纯文本，剥离转义码
             InfoBar.success(title="已保存", content=path, duration=4000, parent=self)
         except OSError as e:
             InfoBar.error(title="保存失败", content=str(e),
@@ -676,7 +806,7 @@ class DapPage(QWidget):
         buf = self._buffers.get(ch_name, "")
         buf += text
         if len(buf) > MAX_CHARS:
-            buf = buf[len(buf) - MAX_CHARS // 2:]
+            buf = self._trim_buf(buf)
         self._buffers[ch_name] = buf
         cur = self._current_channel()
         # 显示文本：所有通道模式每条数据加 [编号]-> 前缀标识来源
@@ -685,15 +815,15 @@ class DapPage(QWidget):
             disp = f"[{ch_name}]-> {text}"
             self._all_buf += disp
             if len(self._all_buf) > MAX_CHARS:
-                self._all_buf = self._all_buf[len(self._all_buf) - MAX_CHARS // 2:]
+                self._all_buf = self._trim_buf(self._all_buf)
         elif ch_name != cur:
             return
         at_bottom = self.rxView.verticalScrollBar().value() >= \
             self.rxView.verticalScrollBar().maximum() - 2
         self.rxView.moveCursor(self.rxView.textCursor().MoveOperation.End)
-        self.rxView.insertPlainText(disp)
+        self._feed_rx_rich(disp)   # 富文本插入（解析 ANSI 转义码上色）
         if len(self.rxView.toPlainText()) > MAX_CHARS:
-            self.rxView.setPlainText(self._all_buf if cur == "*" else buf)
+            self._rebuild_view(self._all_buf if cur == "*" else buf)
         if at_bottom and self.scrollCheck.isChecked():
             self.rxView.verticalScrollBar().setValue(
                 self.rxView.verticalScrollBar().maximum())
@@ -739,9 +869,20 @@ class DapPage(QWidget):
         if not ch or ch == "*":   # 所有通道模式无单一归属，跳过回显
             return
         buf = self._buffers.get(ch, "") + text
+        if len(buf) > MAX_CHARS:
+            buf = self._trim_buf(buf)
         self._buffers[ch] = buf
         if ch == self._current_channel():
-            self.rxView.setPlainText(buf)
+            saved = (self._ansi_fmt, self._ansi_fg,
+                     self._ansi_bg, self._ansi_bold)
+            self._reset_ansi()
+            self._ansi_fg = _SGR_BASE[2]          # green
+            self._sync_fmt()
+            self.rxView.setCurrentCharFormat(self._ansi_fmt)
+            self.rxView.insertPlainText(text)
+            (self._ansi_fmt, self._ansi_fg,
+             self._ansi_bg, self._ansi_bold) = saved
+            self.rxView.setCurrentCharFormat(self._ansi_fmt)
             sb = self.rxView.verticalScrollBar()
             sb.setValue(sb.maximum())
 

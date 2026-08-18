@@ -8,6 +8,7 @@
 """
 import functools
 import threading
+import warnings
 
 from app.mcp_bridge import BridgeError, parse_hex, to_hex
 
@@ -41,6 +42,16 @@ def _guard(fn):
 def build_mcp(bridge):
     """构建 FastMCP 实例并注册全部工具。"""
     from mcp.server.fastmcp import FastMCP
+
+    # mcp SDK 1.29.x 的 FastMCP.Settings.lifespan 注解含前向引用（上游已知
+    # 问题，1.29.0 已是 1.x 最新版），会触发 pydantic-settings 2.15 的
+    # IncompleteFieldDefinitionWarning。仅在构建点过滤这一条上游噪音。
+    # 放在函数内而非模块级：pytest 收集时会撤销模块级 filterwarnings。
+    warnings.filterwarnings(
+        "ignore",
+        message=r"Field 'lifespan' has an incomplete definition",
+        module=r"pydantic_settings\.sources\.utils",
+    )
 
     mcp = FastMCP("all-in-debugger", instructions=INSTRUCTIONS)
     tool = mcp.tool
