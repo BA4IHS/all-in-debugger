@@ -235,6 +235,11 @@ GitHub: [BA4IHS](https://github.com/BA4IHS)
 
 > 若您希望商业闭源分发，需同时向 Riverbank（PyQt6）与 qfluentwidgets 作者购买商业许可证。
 
+## 未来计划
+- 更新MODBUS布局及功能
+- RTT与串口数据图表
+- 弃用PyQt6
+
 ## 鸣谢
 
 - [Img Shields](https://shields.io) — 徽章生成
