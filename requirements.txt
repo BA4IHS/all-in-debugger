@@ -5,3 +5,4 @@ pyte>=0.8.2
 pymodbus>=3.5
 paramiko>=3
 mcp>=1.2,<2
+Nuitka==4.1.3

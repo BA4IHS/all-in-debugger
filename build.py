@@ -81,6 +81,7 @@ def build_args() -> list:
         "--windows-console-mode=disable",   # GUI 程序，不弹控制台（编译后另有 PE 子系统校验）
         # ---- 体积优化（Nuitka 4.1.3 参数已核实）----
         "--lto=yes",                        # 链接期优化；编译器不支持时会报错，可改回 auto
+        "--mingw64",                       # 使用 MinGW64 编译器（MSVC 需手动安装 VS Build Tools）
         "--noinclude-qt-plugins=tls",       # 无 Qt TLS 用途（SSH/TCP 走 socket/paramiko），省 ~0.7MB
         "--noinclude-qt-translations",      # UI 文案中文内置，不需要 Qt 官方翻译文件
         "--company-name=BA4IHS",
@@ -197,7 +198,7 @@ def ensure_libs_copied():
     """把 app/libs 整目录强制复制进产物。
 
     Nuitka 的 --include-data-dir 对含子目录/二进制的 libs 目录复制不完整
-    （实测只带出 README.txt，丢 hidapi.dll 和 adb\ 子目录），这里编译后
+    （实测只带出 README.txt，丢 hidapi.dll 和 adb 子目录），这里编译后
     直接从源码目录整体复制兜底，保证 HID/ADB 原生依赖一定进产物。
     """
     src = ROOT / "app" / "libs"
