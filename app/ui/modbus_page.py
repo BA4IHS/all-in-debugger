@@ -15,7 +15,7 @@ import time
 from PyQt6.QtCore import QEvent, QObject, QRegularExpression, Qt, QTimer
 from PyQt6.QtGui import QFont, QRegularExpressionValidator
 from PyQt6.QtWidgets import (
-    QAbstractItemView, QFileDialog, QHBoxLayout, QHeaderView,
+    QAbstractItemView, QApplication, QFileDialog, QHBoxLayout, QHeaderView,
     QPlainTextEdit, QSplitter, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
@@ -213,7 +213,13 @@ def decode_value(values: list, dtype: str) -> str:
 
 
 class _RowFocusWatcher(QObject):
-    """行内输入控件焦点监听：聚焦视为编辑中，暂停该行自动轮询。"""
+    """行内输入控件事件监听：
+
+    - 聚焦视为编辑中：仅暂停该行自动轮询，不再取消「启用」勾选；
+      失焦自动恢复轮询
+    - 滚轮事件不改 SpinBox/ComboBox 的值，转发给表格视口滚动，
+      避免悬浮滚动表格时误改配置（ComboBox 弹出列表时除外）
+    """
 
     def __init__(self, idx: int, page: "ModbusPage"):
         super().__init__(page)
@@ -221,8 +227,18 @@ class _RowFocusWatcher(QObject):
         self.page = page
 
     def eventFilter(self, obj, event):
-        if event.type() == QEvent.Type.FocusIn:
+        t = event.type()
+        if t == QEvent.Type.FocusIn:
             self.page._on_row_editing(self.idx)
+        elif t == QEvent.Type.FocusOut:
+            self.page._on_row_edit_done(self.idx)
+        elif t == QEvent.Type.Wheel:
+            popup = getattr(obj, "popup", None)
+            if popup is not None and popup.isVisible():
+                return False  # 列表已弹出，滚轮翻选项正常处理
+            # 转发给表格视口滚动，不改变控件值
+            QApplication.sendEvent(self.page.table.viewport(), event)
+            return True
         return False
 
 
@@ -384,7 +400,8 @@ class ModbusPage(QWidget):
             Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         hh = self.table.horizontalHeader()
         hh.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        for c, w in enumerate([80, 86, 96, 150, 138, 130, 140, 104, 62, 62]):
+        #这是列宽设置，依次对应10列表头的宽度（是否启用, 从站地址, 数据地址, 功能码, 数据类型, 别名, 数据, 间隔时间, 读取, 写入）
+        for c, w in enumerate([60, 56, 96, 150, 138, 130, 140, 104, 62, 62]):
             self.table.setColumnWidth(c, w)
         v.addWidget(self.table, 1)
 
@@ -500,6 +517,8 @@ class ModbusPage(QWidget):
         """追加一行配置（cfg 缺失时用默认值），并建立行内控件。"""
         if cfg is None:
             cfg = dict(DEFAULT_ROW)
+            # 新行默认从站地址取连接卡「从站地址」设置
+            cfg["slave"] = self.slaveBox.value()
         row = dict(cfg)
         row["last_poll"] = 0.0
         idx = len(self._rows)
@@ -527,6 +546,25 @@ class ModbusPage(QWidget):
             if w is not None:
                 w.installEventFilter(watcher)
         row["_watcher"] = watcher
+        # 功能码下拉初始选中不触发 currentIndexChanged，
+        # 需主动同步「读取 / 写入」按钮初始使能状态
+        self._on_fc_changed(idx)
+
+    def _rebuild_table(self, rows: list):
+        """清空并用给定行数据重建整表。
+
+        行内控件的回调闭包绑定行号，删除/替换行后旧行号全部失效，
+        必须整体重建才能重新绑定。
+        """
+        for r in range(len(self._rows) - 1, -1, -1):
+            self.table.removeRow(r)
+        self._rows.clear()
+        for r in rows:
+            self._add_row(dict(r))
+        # 已连接时重置轮询计时基准，避免重建后立即触发轮询
+        now = time.monotonic()
+        for row in self._rows:
+            row["last_poll"] = now if self._connected else 0.0
 
     def _set_row(self, idx: int, field: str, value):
         self._rows[idx][field] = value
@@ -535,17 +573,21 @@ class ModbusPage(QWidget):
             self._rows[idx]["last_poll"] = time.monotonic()
 
     def _on_row_editing(self, idx: int):
-        """行内输入控件获得焦点：编辑期间暂停自动读取，并关闭该行启用勾选。"""
+        """行内输入控件获得焦点：编辑期间暂停该行自动轮询（不取消启用）。"""
         if not (0 <= idx < len(self._rows)):
             return
         row = self._rows[idx]
-        if row["enabled"]:
-            row["enabled"] = False
-            cb = self.table.cellWidget(idx, 0)
-            if cb is not None:
-                cb.blockSignals(True)
-                cb.setChecked(False)
-                cb.blockSignals(False)
+        row["_editing"] = True
+        # 基准后移，避免编辑刚结束时立即触发一次轮询
+        row["last_poll"] = time.monotonic()
+
+    def _on_row_edit_done(self, idx: int):
+        """行内输入控件失去焦点：恢复该行自动轮询。"""
+        if not (0 <= idx < len(self._rows)):
+            return
+        row = self._rows[idx]
+        row["_editing"] = False
+        row["last_poll"] = time.monotonic()
 
     def _mk_enabled(self, idx: int, row: dict):
         cb = CheckBox(self.table)
@@ -690,6 +732,10 @@ class ModbusPage(QWidget):
         for r in rows:
             self.table.removeRow(r)
             self._rows.pop(r)
+        # 后续行的控件回调仍闭包旧行号，必须重建整表重新绑定
+        kept = [{k: v for k, v in row.items() if not k.startswith("_")}
+                for row in self._rows]
+        self._rebuild_table(kept)
 
     def _export_config(self):
         path, _ = QFileDialog.getSaveFileName(
@@ -739,16 +785,8 @@ class ModbusPage(QWidget):
                             content="文件中没有可用的配置行",
                             duration=4000, parent=self)
             return
-        # 替换整表
-        for r in range(len(self._rows) - 1, -1, -1):
-            self.table.removeRow(r)
-        self._rows.clear()
-        for r in rows:
-            self._add_row(r)
-        # 已连接时重置轮询计时基准，避免导入后立即触发轮询
-        now = time.monotonic()
-        for row in self._rows:
-            row["last_poll"] = now if self._connected else 0.0
+        # 替换整表（行内控件绑定行号，须整体重建）
+        self._rebuild_table(rows)
         InfoBar.success(title="配置导入",
                         content=f"已导入 {len(self._rows)} 行 ← {path}",
                         duration=4000, parent=self)
@@ -816,9 +854,10 @@ class ModbusPage(QWidget):
         name = row["alias"] or f"@{row['addr']}"
         self._trace(f"TX  FC{fc:02d} @{row['addr']} ×{count} "
                     f"(从站 {row['slave']} · {name})")
+        # tag 携带行号，响应时精确回填到本行
         self.mt.sigRead.emit({
             "fc": fc, "addr": row["addr"], "count": count,
-            "slave": row["slave"]})
+            "slave": row["slave"], "tag": idx})
 
     def _row_write(self, idx: int):
         row = self._rows[idx]
@@ -864,6 +903,8 @@ class ModbusPage(QWidget):
         for idx, row in enumerate(self._rows):
             if not row["enabled"] or row["fc"] not in (1, 2, 3, 4):
                 continue
+            if row.get("_editing"):
+                continue  # 编辑中：暂停轮询，不取消启用
             if now - row["last_poll"] >= max(0.05, row["interval"] / 1000):
                 row["last_poll"] = now
                 self._row_read(idx)
@@ -876,17 +917,27 @@ class ModbusPage(QWidget):
                     f"{r['ms']} ms  [{vals}]")
         self.resultInfo.setText(
             f"FC{r['fc']:02d} @ {r['addr']} ×{len(r['values'])}  {r['ms']} ms")
-        # 回填第一个匹配的读行「数据」列
-        for idx, row in enumerate(self._rows):
-            if row["fc"] == r["fc"] and row["addr"] == r["addr"]:
-                try:
-                    text = decode_value(r["values"], row["dtype"])
-                except (ValueError, OverflowError, IndexError):
-                    text = "?"
-                ed = self.table.cellWidget(idx, 6)
-                if ed is not None:
-                    ed.setText(text)
-                break
+        # 回填「数据」列：UI 发起的读带 tag（行号）精确回填；
+        # MCP 等无 tag 请求按 从站+功能码+地址 匹配第一个读行
+        idx = r.get("tag")
+        if not (isinstance(idx, int) and 0 <= idx < len(self._rows)):
+            idx = None
+            for i, row in enumerate(self._rows):
+                if (row["fc"] == r["fc"] and row["addr"] == r["addr"]
+                        and row["slave"] == r.get("slave")):
+                    idx = i
+                    break
+            if idx is None:
+                return
+        try:
+            text = decode_value(r["values"], self._rows[idx]["dtype"])
+        except (ValueError, OverflowError, IndexError):
+            text = "?"
+        ed = self.table.cellWidget(idx, 6)
+        # 用户正在该行编辑时跳过回填，避免覆盖未完成的输入
+        if ed is not None and not (ed.hasFocus()
+                                   or self._rows[idx].get("_editing")):
+            ed.setText(text)
 
     def _on_write_result(self, r: dict):
         self.resultInfo.setText(

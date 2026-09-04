@@ -144,7 +144,7 @@ class ModbusWorker(QObject):
 
     @pyqtSlot(dict)
     def requestRead(self, req: dict):
-        """req: {fc, addr, count, slave}"""
+        """req: {fc, addr, count, slave, tag}；tag 透传回 readResult 供 UI 精确回填。"""
         if not self._connected or self._client is None:
             self.errorOccurred.emit("Modbus 未连接")
             return
@@ -152,6 +152,7 @@ class ModbusWorker(QObject):
         addr = int(req.get("addr", 0))
         count = max(1, int(req.get("count", 1)))
         slave = int(req.get("slave", 1))
+        tag = req.get("tag")
         method = READ_METHODS.get(fc)
         if method is None:
             self.errorOccurred.emit(f"不支持的读功能码 {fc}")
@@ -170,7 +171,8 @@ class ModbusWorker(QObject):
             return
         values = list(rsp.bits[:count]) if fc in (1, 2) else list(rsp.registers)
         result = {
-            "fc": fc, "addr": addr, "values": values,
+            "fc": fc, "addr": addr, "slave": slave, "values": values,
+            "tag": tag,
             "ts": time.time(), "ms": int((time.time() - t0) * 1000),
         }
         self._lastRead = result
