@@ -15,11 +15,36 @@ from PyQt6.QtCore import QObject, Qt, QThread, pyqtSignal, pyqtSlot
 # 压低 pymodbus 内部重连刷屏日志（"Failed to connect / Repeating...."）
 logging.getLogger("pymodbus").setLevel(logging.ERROR)
 
-try:
-    from pymodbus.client import AsyncModbusSerialClient, AsyncModbusTcpClient
-    _HAS_PYMODBUS = True
-except ImportError:
-    _HAS_PYMODBUS = False
+# pymodbus 延迟导入：顶部 import（~25ms）拖进启动链，而连接前用不到；
+# 首次真正需要时才加载并缓存。
+_pymodbus_client = None   # None=未加载 False=缺失
+
+
+def _get_pymodbus_client():
+    """首次调用时导入 pymodbus 客户端类并缓存；缺失时返回 None。"""
+    global _pymodbus_client, _SLAVE_KWARG
+    if _pymodbus_client is None:
+        try:
+            from pymodbus.client import (
+                AsyncModbusSerialClient, AsyncModbusTcpClient)
+            _pymodbus_client = (AsyncModbusSerialClient,
+                                AsyncModbusTcpClient)
+        except ImportError:
+            _pymodbus_client = False
+            return None
+        # pymodbus 读写方法的从站地址参数名随版本变动：
+        # 旧 3.x 用 unit=，中期用 slave=，3.14+ 用 device_id=
+        _SLAVE_KWARG = next(
+            (k for k in ("device_id", "slave", "unit")
+             if k in inspect.signature(
+                 AsyncModbusTcpClient.read_holding_registers).parameters),
+            "slave")
+    return _pymodbus_client or None
+
+
+# 从站地址参数名：随 pymodbus 加载在 _get_pymodbus_client 里确定，
+# 请求时若尚未加载则回退 "slave"（仅异常路径用）
+_SLAVE_KWARG = "slave"
 
 # 功能码 → 读/写方法映射（pymodbus 客户端方法名）
 READ_METHODS = {
@@ -37,7 +62,7 @@ WRITE_METHODS = {
 
 
 def pymodbus_info() -> str:
-    if _HAS_PYMODBUS:
+    if _get_pymodbus_client() is not None:
         try:
             import pymodbus
             return f"pymodbus {getattr(pymodbus, '__version__', '')}".strip()
@@ -57,14 +82,6 @@ class ModbusWorker(QObject):
     finished = pyqtSignal()
     mcpReply = pyqtSignal(dict)         # MCP 只读查询应答 {op, data|error}
 
-    # pymodbus 读写方法的从站地址参数名随版本变动：
-    # 旧 3.x 用 unit=，中期用 slave=，3.14+ 用 device_id=
-    _SLAVE_KWARG = next(
-        (k for k in ("device_id", "slave", "unit")
-         if k in inspect.signature(
-             AsyncModbusTcpClient.read_holding_registers).parameters),
-        "slave") if _HAS_PYMODBUS else "slave"
-
     def __init__(self):
         super().__init__()
         self._loop = None
@@ -79,7 +96,8 @@ class ModbusWorker(QObject):
 
     @pyqtSlot(dict)
     def requestConnect(self, cfg: dict):
-        if not _HAS_PYMODBUS:
+        pm = _get_pymodbus_client()
+        if pm is None:
             self.connectFailed.emit(pymodbus_info())
             return
         if self._connected:
@@ -91,8 +109,9 @@ class ModbusWorker(QObject):
 
         async def _do():
             # pymodbus 3.x 要求客户端在运行中的事件循环内构造
+            serial_cls, tcp_cls = pm
             if transport == "rtu":
-                client = AsyncModbusSerialClient(
+                client = serial_cls(
                     port=cfg.get("port", ""),
                     baudrate=int(cfg.get("baudrate", 9600)),
                     bytesize=int(cfg.get("bytesize", 8)),
@@ -101,7 +120,7 @@ class ModbusWorker(QObject):
                     timeout=float(cfg.get("timeout", 1.0)),
                 )
             else:
-                client = AsyncModbusTcpClient(
+                client = tcp_cls(
                     host=cfg.get("host", "127.0.0.1"),
                     port=int(cfg.get("tcp_port", 502)),
                     timeout=float(cfg.get("timeout", 1.0)),
@@ -162,7 +181,7 @@ class ModbusWorker(QObject):
             rsp = self._loop.run_until_complete(
                 getattr(self._client, method)(
                     address=addr, count=count,
-                    **{self._SLAVE_KWARG: slave}))
+                    **{_SLAVE_KWARG: slave}))
         except Exception as e:
             self.errorOccurred.emit(f"读取异常：{e}")
             return
@@ -193,7 +212,7 @@ class ModbusWorker(QObject):
             self.errorOccurred.emit(f"写请求无效（FC{fc}）")
             return
         try:
-            skw = {self._SLAVE_KWARG: slave}
+            skw = {_SLAVE_KWARG: slave}
             if fc == 5:
                 coro = self._client.write_coil(
                     address=addr, value=bool(values[0]), **skw)

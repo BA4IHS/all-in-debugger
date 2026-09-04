@@ -13,21 +13,32 @@ import time
 
 from PyQt6.QtCore import QObject, Qt, QThread, pyqtSignal, pyqtSlot
 
-try:
-    import paramiko
-    HAS_PARAMIKO = True
-except ImportError:
-    paramiko = None
-    HAS_PARAMIKO = False
+# paramiko 延迟导入：顶部 import 会把 paramiko+invoke（~150ms）拖进
+# 启动链，而 SSH 连接前用不到；首次真正需要时才加载并缓存。
+_paramiko = None
+
+
+def _get_paramiko():
+    """首次调用时导入 paramiko 并缓存；缺失时返回 None。"""
+    global _paramiko
+    if _paramiko is None:
+        try:
+            import paramiko as _pm
+            _paramiko = _pm
+        except ImportError:
+            _paramiko = False
+    return _paramiko or None
+
 
 # MCP exec/list 结果中单字段截断上限，避免超大输出撑爆应答
 EXEC_TEXT_CAP = 32768
 
 
 def paramiko_info() -> str:
-    if not HAS_PARAMIKO:
+    pm = _get_paramiko()
+    if pm is None:
         return "缺少 paramiko 依赖（pip install paramiko）"
-    return f"paramiko {paramiko.__version__}"
+    return f"paramiko {pm.__version__}"
 
 
 class SshWorker(QObject):
@@ -57,7 +68,8 @@ class SshWorker(QObject):
     @pyqtSlot(dict)
     def requestConnect(self, cfg: dict):
         """cfg: {host, port, username, password, key_path, timeout, cols, rows}"""
-        if not HAS_PARAMIKO:
+        paramiko = _get_paramiko()
+        if paramiko is None:
             self.connectFailed.emit(paramiko_info())
             return
         if self._connected:
