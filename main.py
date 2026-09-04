@@ -27,18 +27,24 @@ CREATE_NO_WINDOW = 0x08000000
 
 
 def _spawn_splash_proc():
-    """启动独立加载动画进程（源码运行时）。
+    """启动独立加载动画进程。
 
     Qt 单 GUI 线程模型下，主线程被页面构造阻塞时进程内任何窗口都会
     冻结；独立进程渲染的转圈不受影响，等同 Win11 启动动画体验。
-    打包版（Nuitka frozen，无可用 python 解释器）返回 None，
-    由 main() 回退为主窗口内嵌遮罩方案。
+
+    - 源码运行：python -m app.ui.splash_proc <父PID>
+    - 打包运行：派生自身 exe（--splash-proc <父PID>，main() 入口分流），
+      Nuitka 产物内无独立 python 解释器，spawn 自身是唯一途径；
+      standalone 模式无解压开销，重复启动仅多一次 Qt 库加载
+    spawn 失败返回 None，由 main() 回退为主窗口内嵌遮罩方案。
     """
     if getattr(sys, "frozen", False):
-        return None
+        args = [sys.executable, "--splash-proc", str(os.getpid())]
+    else:
+        args = [sys.executable, "-m", "app.ui.splash_proc", str(os.getpid())]
     try:
         return subprocess.Popen(
-            [sys.executable, "-m", "app.ui.splash_proc", str(os.getpid())],
+            args,
             cwd=str(ROOT),
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -58,6 +64,13 @@ def _stop_splash_proc(proc):
 
 
 def main():
+    # 本 exe 以 --splash-proc 参数启动时，仅作为加载动画子进程运行
+    # （打包版主进程派生自身 exe 实现独立转圈，见 _spawn_splash_proc）
+    if "--splash-proc" in sys.argv[1:]:
+        from app.ui import splash_proc
+        splash_proc.main()
+        return
+
     QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
     app = QApplication(sys.argv)

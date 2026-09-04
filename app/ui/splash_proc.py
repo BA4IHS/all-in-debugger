@@ -102,9 +102,22 @@ class SpinWindow(QWidget):
                    Qt.AlignmentFlag.AlignCenter, "正在启动 all-in-debugger…")
 
 
-def main():
-    pid = int(sys.argv[1]) if len(sys.argv) > 1 else 0
-    app = QApplication(sys.argv)
+def main(argv=None):
+    """动画子进程入口。
+
+    兼容两种调用形式：
+    - python -m app.ui.splash_proc <父PID>       （源码模式）
+    - all-in-debugger.exe --splash-proc <父PID>  （打包模式，派生自身 exe）
+    """
+    argv = list(sys.argv if argv is None else argv)
+    pid = 0
+    for a in reversed(argv[1:]):
+        if a.isdigit():
+            pid = int(a)
+            break
+    QApplication.setHighDpiScaleFactorRoundingPolicy(
+        Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
+    app = QApplication(argv)
     win = SpinWindow(pid)
     win.show()
     app.exec()

@@ -62,6 +62,10 @@ def build_args() -> list:
         "--include-package=mcp",
         # qfluentwidgets 的图标等资源文件（FluentIcon 渲染依赖）
         "--include-package-data=qfluentwidgets",
+        # 启动加载动画子进程模块（main.py 以 --splash-proc 参数派生自身 exe
+        # 后分流到该模块；函数内 import Nuitka 可静态跟踪，此处显式
+        # include 兑现包安全，防止优化裁剪）
+        "--include-module=app.ui.splash_proc",
         # ---- 业务数据（frozen 模式下由 sys.executable / __file__ 定位）----
         # hidapi.dll + 官方 adb 三件套（app/native.py 的 LIBS_DIR）
         "--include-data-dir=app/libs=app/libs",
