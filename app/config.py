@@ -47,6 +47,9 @@ class Config(QConfig):
     adbPath = ConfigItem("ADB", "AdbPath", default="adb")
     defaultModel = ConfigItem("ADB", "DefaultModel", default="")
 
+    # PhoenixConsole 烧录工具
+    phoenixPath = ConfigItem("Phoenix", "ExePath", default="")
+
     # MCP 服务（内嵌，重启后生效）
     mcpEnabled = OptionsConfigItem(
         "MCP", "Enabled", default=False, validator=BoolValidator())

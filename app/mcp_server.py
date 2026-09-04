@@ -14,7 +14,7 @@ from app.mcp_bridge import BridgeError, parse_hex, to_hex
 
 INSTRUCTIONS = (
     "all-in-debugger 的调试能力集合：串口、USB HID、ADB、DAP-Link RTT、Modbus、SSH、"
-    "TCP/IP 网络（UDP/TCP Server/TCP Client）。"
+    "TCP/IP 网络（UDP/TCP Server/TCP Client）、Phoenix 固件烧录。"
     "典型流程：先 *_status / *_enumerate 查询，再 open/connect/start，"
     "然后 send/write/read。HEX 数据用空格分隔的十六进制字节表示。"
 )
@@ -228,6 +228,35 @@ def build_mcp(bridge):
         import anyio
         return await anyio.to_thread.run_sync(
             lambda: bridge.adb_pull(serial, remote, local, timeout))
+
+    # ── Phoenix 烧录（全志 PhoenixConsole 命令行）──────────────
+
+    @tool()
+    @_guard
+    async def phoenix_info() -> dict:
+        """查询 PhoenixConsole 烧录工具可用状态（路径/版本）。
+
+        未在 GUI 小工具页配置 PhoenixConsole.exe 时 available 为 False，
+        error 字段说明原因。"""
+        import anyio
+        return await anyio.to_thread.run_sync(bridge.phoenix_info)
+
+    @tool()
+    @_guard
+    async def phoenix_burn(image_path: str, count: int = 1, serial: str = "",
+                           erase: int = -1, reboot: bool = False,
+                           timeout_s: int = 600) -> dict:
+        """调用 PhoenixConsole 烧录全志固件（blocking，耗时较长）。
+
+        image_path：固件包 *.img 的绝对路径；count：烧录设备数量；
+        serial：设备 adb serial（留空自动检测）；erase 取值：-1 不擦除，
+        0/1 产品模式，10/11/12 升级模式（11=擦逻辑分区，12=全擦）；
+        reboot：烧录完成后是否重启设备；timeout_s：整体超时秒数。
+        设备需先在 ADB 可见，首次烧录需在 GUI 安装 AW 驱动。"""
+        import anyio
+        return await anyio.to_thread.run_sync(
+            lambda: bridge.phoenix_burn(image_path, count, serial, erase,
+                                        reboot, float(timeout_s)))
 
     # ── DAP-RTT ────────────────────────────────────────────────
 

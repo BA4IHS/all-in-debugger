@@ -1,4 +1,4 @@
-# Byte-compiled / optimized
+﻿# Byte-compiled / optimized
 __pycache__/
 *.py[cod]
 *$py.class
@@ -32,11 +32,16 @@ tests/
 # Runtime / user-generated data
 config.json
 data.json
+build_run.log
 
 # Local AI tooling
 .qoder/
 logs/
 adb_report_*.txt
+
+# Third-party commercial tooling (license-restricted, NOT committed; user-provided)
+# PhoenixConsole 为全志商业工具：请用户自行整套拷入 app/libs/phoenix/ 后免配置使用
+app/libs/phoenix/
 
 # Local diagnostics / screenshots (temp, underscore-prefixed)
 _*.png
@@ -45,5 +50,7 @@ _*.png
 Thumbs.db
 Desktop.ini
 .DS_Store
-app/adb_profiles/T153_tina_ָ���.md
+
+# 本地板级配置 / 内部指令表（含真实设备序列号与内部信息，不入库）
 app/T153_tina.json
+app/adb_profiles/T153_tina_指令表.md

@@ -64,9 +64,12 @@
 | **SSH** | paramiko 交互终端、密码/私钥认证、会话保存（密码不落盘）、SFTP 目录浏览/上传/下载/删除 |
 | **TCP/IP 网络** | UDP / TCP Server / TCP Client 三模式；TCP Server 多客户端管理（发送目标指定/全体广播/断开选中与全部）、文本/HEX 收发、时间戳、终端模式、周期发送、文件发送（整包或按包大小+间隔分包）、原始字节日志（.bin）、收发区外观自定义（字号/文字色/背景色） |
 | **内容查找** | 串口日志、各终端 `Ctrl+F` 查找，匹配计数、循环跳转、结果高亮 |
+| **Phoenix 烧录** | 全志 PhoenixConsole 命令行量产烧录（小工具页独立窗口 + MCP 工具）；工具为商业软件不随仓库分发：整套拷入 `app/libs/phoenix/` 后自动识别，或手动指定 exe |
 | **主题** | 浅色 / 深色 / 跟随系统，全控件主题自适应 |
 
 > 原生依赖统一放 `app/libs/`（hidapi.dll + 官方 adb 三件套，随程序交付）；缺失时相应页面优雅降级并提示。
+>
+> Phoenix 烧录工具（全志 PhoenixConsole）为商业软件，不随仓库分发：将工具包整套拷入 `app/libs/phoenix/` 后自动识别，也可在小工具窗口手动指定 exe 路径。
 
 ## 界面预览
 
@@ -162,7 +165,8 @@ all-in-debugger/
     ├── tcpip_worker.py     # TCP/IP 收发线程（selectors 多路复用 socket）
     ├── mcp_bridge.py       # MCP 桥接（跨线程信号转发）
     ├── mcp_server.py       # 内嵌 MCP 服务（43 个工具）
-    ├── libs/               # hidapi.dll + adb 三件套（随程序交付）
+    ├── libs/               # hidapi.dll + adb 三件套（随程序交付）；phoenix/ 为商业工具
+    │                       # 用户自备（整套拷入即自动识别，见上方引用块）
     └── ui/
         ├── main_window.py  # SplitFluentWindow 九页面
         ├── console_page.py # 主调试页（左配置 + 右收发）

@@ -558,9 +558,9 @@ class TcpipPage(QWidget):
             table.setItem(row, 0, QTableWidgetItem(addr))
         self.targetCombo.clear()
         if clients:
-            self.targetCombo.addItem("全部客户端", "ALL")
+            self.targetCombo.addItem("全部客户端", userData="ALL")
         for addr in clients:
-            self.targetCombo.addItem(addr, addr)
+            self.targetCombo.addItem(addr, userData=addr)
         if prev and prev != "ALL" and prev in clients:
             self.targetCombo.setCurrentText(prev)
         elif prev == "ALL" and clients:

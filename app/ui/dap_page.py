@@ -14,8 +14,7 @@ import time
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QBrush, QColor, QFont, QIntValidator, QTextCharFormat
 from PyQt6.QtWidgets import (
-    QFileDialog, QHBoxLayout, QPlainTextEdit, QRadioButton, QSplitter,
-    QVBoxLayout, QWidget,
+    QFileDialog, QHBoxLayout, QRadioButton, QSplitter, QVBoxLayout, QWidget,
 )
 
 from qfluentwidgets import (
@@ -31,6 +30,7 @@ from app import dap_rtt
 from app import chip_profile
 from app.dap_worker import DapThread
 from app.ui.console_style import setup_log_view
+from app.ui.searchable_text_edit import SearchablePlainTextEdit
 
 MAX_CHARS = 400_000
 
@@ -430,7 +430,8 @@ class DapPage(QWidget):
         bar.addWidget(clearBtn)
         v.addLayout(bar)
 
-        self.rxView = QPlainTextEdit(card)
+        # 与串口日志视图一致：支持 Ctrl+F / 右键查找、循环跳转、全量匹配高亮
+        self.rxView = SearchablePlainTextEdit(card)
         self.rxView.setReadOnly(True)
         self.rxView.setFont(QFont("Consolas", 10))
         setup_log_view(self.rxView)

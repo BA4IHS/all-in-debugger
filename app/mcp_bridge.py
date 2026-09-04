@@ -22,6 +22,9 @@ class BridgeError(RuntimeError):
 
 DEFAULT_TIMEOUT = 5.0
 ADB_TIMEOUT_CAP = 300.0
+PHOENIX_TIMEOUT_CAP = 1800.0   # Phoenix 整机烧录硬超时上限（秒）
+PHOENIX_OUTPUT_CAP = 20000    # 成功输出回传截断（字符）
+PHOENIX_ERROR_TAIL = 800      # 失败时附带的输出尾部（字符）
 
 
 def to_hex(data: bytes) -> str:
@@ -59,6 +62,12 @@ class WorkerBridge:
         self.sht = sht  # SshThread（可选）
         self.tp = tp    # TcpipThread（可选）
         self._hid_cache = []
+        # 命令类操作（_emit_wait）串行化锁：
+        # 底层 sig* 信号不带请求 id，若两个线程并发等待同一信号，
+        # 后到的回调也会被同一份结果唤醒（串扰）。持锁保证同一时刻
+        # 只有一个等待者，正确性优先（并发请求排队执行）。
+        self._emit_lock = threading.Lock()
+        self._query_lock = threading.Lock()  # sigMcpQuery → mcpReply 也串行化，避免请求 id 冲突
 
     # ── 通用机制 ───────────────────────────────────────────────
 
@@ -93,7 +102,17 @@ class WorkerBridge:
 
     def _emit_wait(self, ok_signals, err_signals, emit, timeout: float,
                    label: str):
-        """emit() 发命令，等待 ok/err 任一信号，返回 ok 信号的参数元组。"""
+        """emit() 发命令，等待 ok/err 任一信号，返回 ok 信号的参数元组。
+
+        整体持 _emit_lock：信号不带请求 id，并发等待会互相抢收结果，
+        故同一时刻只允许一个命令在途（并发请求排队执行）。
+        """
+        with self._emit_lock:
+            return self._emit_wait_locked(ok_signals, err_signals, emit,
+                                          timeout, label)
+
+    def _emit_wait_locked(self, ok_signals, err_signals, emit, timeout: float,
+                          label: str):
         box = {}
         ev = threading.Event()
         conns = []
@@ -558,3 +577,73 @@ class WorkerBridge:
             args += ["-s", str(serial)]
         args += ["pull", str(remote), str(local)]
         return {"output": self._run_adb(args, timeout)}
+
+    # ── Phoenix 烧录（subprocess 直连，不经 worker）────────────
+
+    def _phoenix_path(self) -> str:
+        from app import phoenix_runner
+        from app.config import cfg, qconfig
+        path, err = phoenix_runner.find_phoenix(qconfig.get(cfg.phoenixPath))
+        if not path:
+            raise BridgeError(err or "未配置 PhoenixConsole")
+        return path
+
+    def phoenix_info(self) -> dict:
+        """探测 PhoenixConsole 可用状态（路径/版本），不抛错。"""
+        from app import phoenix_runner
+        from app.config import cfg, qconfig
+        info = {"available": False, "path": "", "version": "",
+                "error": ""}
+        path, err = phoenix_runner.find_phoenix(qconfig.get(cfg.phoenixPath))
+        if not path:
+            info["error"] = err
+            return info
+        info["path"] = path
+        try:
+            r = phoenix_runner.run_burn_sync(path, ["-v"], 6.0)
+        except Exception as e:  # noqa: BLE001 - 状态探测需容错
+            info["error"] = f"版本探测失败：{e}"
+            return info
+        out = (r.stdout or "") + (r.stderr or "")
+        info["version"] = phoenix_runner.parse_version(out)
+        info["available"] = bool(info["version"]) and r.returncode == 0
+        return info
+
+    def phoenix_burn(self, image_path: str, count: int = 1, serial: str = "",
+                     erase: int = -1, reboot: bool = False,
+                     timeout_s: float = 600.0, usb_port: int = -1) -> dict:
+        """调用 PhoenixConsole 烧录固件；占用全局烧录槽，防 GUI 并发。"""
+        import subprocess
+        from pathlib import Path
+
+        from app import phoenix_runner
+        if not Path(str(image_path)).is_file():
+            raise BridgeError(f"固件文件不存在：{image_path}")
+        try:
+            args = phoenix_runner.build_command(
+                "phoenix", str(image_path), count, serial=serial,
+                erase=erase, reboot=reboot, timeout_s=timeout_s,
+                usb_port=usb_port)
+        except ValueError as e:
+            raise BridgeError(str(e)) from None
+        args = args[1:]   # 去掉 build_command 占位的 exe
+        timeout = max(1.0, min(float(timeout_s) + 60.0,
+                               PHOENIX_TIMEOUT_CAP))
+        if not phoenix_runner.try_acquire_burn():
+            raise BridgeError("已有烧录任务进行中（GUI 或 MCP 占用），"
+                              "请等待完成后再试")
+        try:
+            r = phoenix_runner.run_burn_sync(self._phoenix_path(), args,
+                                             timeout)
+        except subprocess.TimeoutExpired:
+            raise BridgeError(f"烧录超时（>{timeout:g}s），进程已终止") from None
+        except Exception as e:  # noqa: BLE001 - 统一转 BridgeError
+            raise BridgeError(f"烧录执行失败：{e}") from None
+        finally:
+            phoenix_runner.release_burn()
+        out = (r.stdout or "") + (r.stderr or "")
+        if r.returncode != 0:
+            raise BridgeError(f"烧录失败（退出码 {r.returncode}）：\n"
+                              f"{out.strip()[-PHOENIX_ERROR_TAIL:]}")
+        return {"exit_code": int(r.returncode),
+                "output": out.strip()[-PHOENIX_OUTPUT_CAP:]}

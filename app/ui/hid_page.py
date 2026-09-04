@@ -12,8 +12,8 @@ import json
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
-    QAbstractItemView, QCheckBox, QHBoxLayout, QHeaderView, QPlainTextEdit,
-    QSplitter, QTableWidgetItem, QVBoxLayout, QWidget,
+    QAbstractItemView, QCheckBox, QHBoxLayout, QHeaderView, QSplitter,
+    QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from qfluentwidgets import (
@@ -28,6 +28,7 @@ from app.hid_worker import HidThread
 from app.native import LIBS_DIR, NativeError
 from app import hid_binding
 from app.ui.console_style import setup_log_view
+from app.ui.searchable_text_edit import SearchablePlainTextEdit
 
 MAX_CHARS = 200_000
 TEMPLATE_FILE = LIBS_DIR.parent / "hid_templates.json"
@@ -301,7 +302,8 @@ class HidPage(QWidget):
         bar.addWidget(clearBtn)
         v.addLayout(bar)
 
-        self.rxView = QPlainTextEdit(card)
+        # 与串口日志视图一致：支持 Ctrl+F / 右键查找、循环跳转、全量匹配高亮
+        self.rxView = SearchablePlainTextEdit(card)
         self.rxView.setReadOnly(True)
         self.rxView.setFont(QFont("Consolas", 10))
         setup_log_view(self.rxView)

@@ -1,41 +1,90 @@
 # coding: utf-8
 """Modbus 调试页：对标 Modbus Poll（主站）。
 
-- 连接：RTU / TCP + 从站地址
-- 轮询定义：功能码 / 起始地址 / 数量 / 轮询间隔，连接后自动刷新数据表
-- 数据表：多种显示格式（Unsigned/Signed/Hex/Float/ASCII），
-  双击单元格可直接写入（寄存器 FC06 / 线圈 FC05）
+- 连接：RTU / TCP
+- 读写配置表：每行一条定义（是否启用 / 从站地址 / 数据地址 / 功能码 / 数据类型 /
+  别名 / 数据 / 间隔时间），行内「读取 / 写入」按钮即时操作，
+  启用且为读功能码的行按各自间隔自动轮询
+- 配置导出：整表配置导出为 JSON 文件
 - 通信监视：请求/响应 Trace 日志
 """
+import json
 import struct
+import time
 
-from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QColor, QFont
+from PyQt6.QtCore import QEvent, QObject, QRegularExpression, Qt, QTimer
+from PyQt6.QtGui import QFont, QRegularExpressionValidator
 from PyQt6.QtWidgets import (
-    QAbstractItemView, QDialog, QHBoxLayout, QHeaderView, QPlainTextEdit,
-    QSplitter, QTableWidgetItem, QVBoxLayout, QWidget,
+    QAbstractItemView, QFileDialog, QHBoxLayout, QHeaderView,
+    QPlainTextEdit, QSplitter, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from qfluentwidgets import (
-    Action, BodyLabel, CaptionLabel, CardWidget, ComboBox, FluentIcon,
-    InfoBar, LineEdit, PrimaryPushButton, PushButton, RoundMenu,
-    SingleDirectionScrollArea, SpinBox, SubtitleLabel, SwitchButton,
-    TableWidget, ToolButton,
+    BodyLabel, CaptionLabel, CardWidget, CheckBox, ComboBox, FluentIcon,
+    InfoBar, LineEdit, PrimaryPushButton, PushButton,
+    SingleDirectionScrollArea, SpinBox, SubtitleLabel, TableWidget,
+    ToolButton,
 )
 
 from app import modbus_core as mb
 from app import serial_utils as su
 from app.ui.console_style import setup_log_view
 
-READ_FCS = {
-    "01 读线圈": 1,
-    "02 读离散输入": 2,
-    "03 读保持寄存器": 3,
-    "04 读输入寄存器": 4,
+# 功能码选项（显示名 → 码）
+FC_ITEMS = [
+    ("01 读线圈", 1), ("02 读离散输入", 2),
+    ("03 读保持寄存器", 3), ("04 读输入寄存器", 4),
+    ("05 写单个线圈", 5), ("06 写单个寄存器", 6),
+    ("15 写多个线圈", 15), ("16 写多个寄存器", 16),
+]
+FC_CODES = [code for _name, code in FC_ITEMS]
+
+# 数据类型选项（显示名 → (内部标识, 寄存器数)），按数据宽度由小到大排序；
+# 32 位及以上区分寄存器大端/小端（_be 高字在前，_le 低字在前）
+DT_ITEMS = [
+    ("bin（原始二进制）", "bin", 1),
+    ("bit（1位）", "bit", 1),
+    ("uint8（8位）", "uint8", 1),
+    ("int8（8位）", "int8", 1),
+    ("uint16（16位）", "uint16", 1),
+    ("int16（16位）", "int16", 1),
+    ("uint32 大端（32位）", "uint32_be", 2),
+    ("uint32 小端（32位）", "uint32_le", 2),
+    ("int32 大端（32位）", "int32_be", 2),
+    ("int32 小端（32位）", "int32_le", 2),
+    ("float 大端（32位）", "float_be", 2),
+    ("float 小端（32位）", "float_le", 2),
+    ("ASCII（4字符）", "ascii", 2),
+    ("double 大端（64位）", "double_be", 4),
+    ("double 小端（64位）", "double_le", 4),
+]
+DT_NAMES = [name for name, _id, _n in DT_ITEMS]        # 下拉显示名
+DT_IDS = {name: _id for name, _id, _n in DT_ITEMS}      # 显示名 → 内部标识
+DT_SIZES = {_id: _n for _name, _id, _n in DT_ITEMS}     # 内部标识 → 寄存器数
+PAIR_TYPES = {_id for _name, _id, _n in DT_ITEMS if _n == 2}  # 兼容旧引用
+
+# 旧版本 dtype 标识 → 新标识（旧版无大小端概念，默认大端）
+_DTYPE_ALIAS = {
+    "uint32": "uint32_be", "int32": "int32_be",
+    "float": "float_be", "ASCII": "ascii",
 }
-FORMATS = ["Unsigned", "Signed", "Hex", "Float (2 reg)", "ASCII"]
-PAIR_FMTS = ("Float (2 reg)", "ASCII")
-# 网格：每列固定 10 个寄存器（列头 = 组起始地址，行 0~9 为组内偏移）
+
+# 新行默认值（点击「添加」追加）
+DEFAULT_ROW = {
+    "enabled": True, "slave": 1, "addr": 0, "fc": 3,
+    "dtype": "uint16", "alias": "", "value": "", "interval": 1000,
+}
+# 初始示例行（与需求文档一致）
+DEFAULT_ROWS = [
+    {"enabled": True, "slave": 1, "addr": 4, "fc": 6,
+     "dtype": "uint16", "alias": "测试 1", "value": "65535", "interval": 100},
+    {"enabled": True, "slave": 1, "addr": 40, "fc": 6,
+     "dtype": "uint16", "alias": "测试 1", "value": "65535", "interval": 100},
+    {"enabled": True, "slave": 1, "addr": 50, "fc": 6,
+     "dtype": "float_be", "alias": "测试 1", "value": "55655", "interval": 100},
+]
+
+# ── 编解码纯函数（tests/test_modbus_grid.py 依赖以下旧网格函数）──
 ROWS_PER_GROUP = 10
 
 
@@ -79,14 +128,111 @@ def parse_ascii_pair(text: str) -> tuple:
     return struct.unpack(">HH", raw)
 
 
+def encode_value(text: str, dtype: str) -> list:
+    """按数据类型把「数据」列文本编码为寄存器值列表。
+
+    - bin：hex 字节流（空格分隔），每 2 字节一个寄存器（大端，奇数补 \\x00）
+    - bit：0/1 单寄存器
+    - uint8/int8：低 8 位；uint16/int16：整字
+    - *_be：高字在前；*_le：低字在前；double 占 4 寄存器
+    """
+    text = text.strip()
+    dtype = _DTYPE_ALIAS.get(dtype, dtype)
+    if dtype == "bin":
+        raw = bytes.fromhex(text.replace(" ", ""))
+        if len(raw) % 2:
+            raw += b"\x00"
+        return [int.from_bytes(raw[i:i + 2], "big")
+                for i in range(0, len(raw), 2)]
+    if dtype == "bit":
+        return [1 if int(text, 0) else 0]
+    if dtype in ("uint8", "int8"):
+        return [int(text, 0) & 0xFF]
+    if dtype in ("uint16", "int16"):
+        return [int(text, 0) & 0xFFFF]
+    if dtype.endswith("_be") or dtype.endswith("_le"):
+        little = dtype.endswith("_le")
+        kind = dtype[:-3]
+        n = DT_SIZES[dtype]
+        if kind == "float":
+            word = struct.unpack(">I", struct.pack(">f", float(text)))[0]
+        elif kind == "double":
+            word = struct.unpack(">Q", struct.pack(">d", float(text)))[0]
+        else:
+            word = int(text, 0) & ((1 << (16 * n)) - 1)
+        if little:
+            return [(word >> (16 * i)) & 0xFFFF for i in range(n)]
+        return [(word >> (16 * (n - 1 - i))) & 0xFFFF for i in range(n)]
+    if dtype == "ascii":
+        return list(parse_ascii_pair(text))
+    raise ValueError(f"未知数据类型 {dtype}")
+
+
+def decode_value(values: list, dtype: str) -> str:
+    """读取结果按数据类型解码为「数据」列显示文本。"""
+    dtype = _DTYPE_ALIAS.get(dtype, dtype)
+    if dtype == "bin":
+        raw = b"".join(struct.pack(">H", int(v) & 0xFFFF)
+                       for v in values)
+        return " ".join(f"{b:02X}" for b in raw)
+    if dtype == "bit":
+        return "1" if int(values[0]) & 1 else "0"
+    if dtype == "uint8":
+        return str(int(values[0]) & 0xFF)
+    if dtype == "int8":
+        v = int(values[0]) & 0xFF
+        return str(v - 0x100 if v >= 0x80 else v)
+    if dtype in ("uint16", "int16"):
+        return format_value(int(values[0]) & 0xFFFF,
+                            "Signed" if dtype == "int16" else "Unsigned")
+    if dtype.endswith("_be") or dtype.endswith("_le"):
+        little = dtype.endswith("_le")
+        kind = dtype[:-3]
+        n = DT_SIZES[dtype]
+        word = 0
+        if little:
+            for i, v in enumerate(values[:n]):
+                word |= (int(v) & 0xFFFF) << (16 * i)
+        else:
+            for v in values[:n]:
+                word = (word << 16) | (int(v) & 0xFFFF)
+        if kind == "uint32":
+            return str(word & 0xFFFFFFFF)
+        if kind == "int32":
+            v = word & 0xFFFFFFFF
+            return str(v - 0x100000000 if v >= 0x80000000 else v)
+        if kind == "float":
+            # float32 有效数字约 7 位：%.7g 才能还原用户输入的小数，
+            # %.6g 会截断（如 123.4567 → 123.457）
+            return f"{struct.unpack('>f', struct.pack('>I', word & 0xFFFFFFFF))[0]:.7g}"
+        if kind == "double":
+            return f"{struct.unpack('>d', struct.pack('>Q', word & 0xFFFFFFFFFFFFFFFF))[0]:.15g}"
+    if dtype == "ascii":
+        return format_ascii_pair(int(values[0]), int(values[1]))
+    return str(values[0])
+
+
+class _RowFocusWatcher(QObject):
+    """行内输入控件焦点监听：聚焦视为编辑中，暂停该行自动轮询。"""
+
+    def __init__(self, idx: int, page: "ModbusPage"):
+        super().__init__(page)
+        self.idx = idx
+        self.page = page
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Type.FocusIn:
+            self.page._on_row_editing(self.idx)
+        return False
+
+
 class ModbusPage(QWidget):
 
     def __init__(self, mt: "mb.ModbusThread", parent=None):
         super().__init__(parent)
         self.mt = mt
         self._connected = False
-        self._last_read = None        # 最近一次读结果 {fc, addr, values}
-        self._cell_fmt = {}           # 逐格类型覆盖 {绝对地址: 格式}
+        self._rows = []   # 读写配置行 [{enabled, slave, addr, fc, dtype, alias, value, interval, last_poll}]
 
         scroll = SingleDirectionScrollArea(self)
         left = QWidget()
@@ -94,7 +240,6 @@ class ModbusPage(QWidget):
         ll.setContentsMargins(0, 0, 0, 0)
         ll.setSpacing(12)
         ll.addWidget(self._build_connect_card())
-        ll.addWidget(self._build_poll_card())
         ll.addStretch(1)
         scroll.setWidget(left)
         scroll.setFixedWidth(330)
@@ -104,7 +249,7 @@ class ModbusPage(QWidget):
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
         splitter = QSplitter(Qt.Orientation.Vertical, self)
-        splitter.addWidget(self._build_table_card())
+        splitter.addWidget(self._build_config_card())
         splitter.addWidget(self._build_trace_card())
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 2)
@@ -118,6 +263,8 @@ class ModbusPage(QWidget):
 
         self._connect_signals()
         self._on_transport_changed(self.transportCombo.currentText())
+        for cfg in DEFAULT_ROWS:
+            self._add_row(dict(cfg))
 
     # ── 左：连接卡 ─────────────────────────────────────────────
 
@@ -198,113 +345,62 @@ class ModbusPage(QWidget):
         v.addWidget(self.statusLabel)
         return card
 
-    # ── 左：轮询定义卡 ─────────────────────────────────────────
+    # ── 左：连接设置（读写定义并入右侧表格，逐行独立配置） ──
 
-    def _build_poll_card(self) -> CardWidget:
-        card = CardWidget()
-        v = QVBoxLayout(card)
-        v.setContentsMargins(16, 14, 16, 14)
-        v.setSpacing(8)
-        v.addWidget(SubtitleLabel("轮询定义", card))
+    # ── 右：读写配置表 ─────────────────────────────────────────
 
-        r1 = QHBoxLayout()
-        self.fcCombo = ComboBox(card)
-        self.fcCombo.addItems(list(READ_FCS))
-        self.fcCombo.setCurrentIndex(2)  # 03
-        r1.addWidget(BodyLabel("功能码", card))
-        r1.addWidget(self.fcCombo, 1)
-        v.addLayout(r1)
-
-        r2 = QHBoxLayout()
-        r2.addWidget(BodyLabel("起始地址", card))
-        self.addrBox = SpinBox(card)
-        self.addrBox.setRange(0, 65535)
-        self.addrBox.setMinimumWidth(128)
-        r2.addWidget(self.addrBox, 1)
-
-        # 挤掉了换行
-        # r2.addWidget(BodyLabel("数量", card))  
-        # self.countBox = SpinBox(card)
-        # self.countBox.setRange(1, 125)
-        # self.countBox.setValue(10)
-        # self.countBox.setMinimumWidth(56)
-        # r2.addWidget(self.countBox, 1)
-        v.addLayout(r2)
-
-        r3 = QHBoxLayout()
-        r3.addWidget(BodyLabel("数量", card))
-        self.countBox = SpinBox(card)
-        self.countBox.setRange(1, 125)
-        self.countBox.setValue(10)
-        self.countBox.setMinimumWidth(56)
-        r3.addWidget(self.countBox, 1)
-        v.addLayout(r3)
-
-        prow = QHBoxLayout()
-        prow.addWidget(BodyLabel("轮询间隔", card))
-        self.pollBox = SpinBox(card)
-        self.pollBox.setRange(100, 600_000)
-        self.pollBox.setValue(1000)
-        self.pollBox.setSuffix(" ms")
-        self.pollBox.setMinimumWidth(90)
-        
-        self.pollSwitch = SwitchButton(card)
-        self.pollSwitch.setChecked(True)
-        self.pollSwitch.setOnText("开")
-        self.pollSwitch.setOffText("关")
-        prow.addWidget(self.pollBox, 1)
-        prow.addWidget(self.pollSwitch)
-        v.addLayout(prow)
-
-        hint = CaptionLabel(
-            "连接成功后按定义自动轮询；数据表一个寄存器一个小格，"
-            "双击可写入，右键可设置逐格数据类型。", card)
-        hint.setWordWrap(True)
-        v.addWidget(hint)
-        return card
-
-    # ── 右：数据表 ─────────────────────────────────────────────
-
-    def _build_table_card(self) -> CardWidget:
+    def _build_config_card(self) -> CardWidget:
         card = CardWidget()
         v = QVBoxLayout(card)
         v.setContentsMargins(12, 10, 12, 10)
         v.setSpacing(6)
+
         bar = QHBoxLayout()
-        bar.addWidget(SubtitleLabel("数据", card))
-        self.formatCombo = ComboBox(card)
-        self.formatCombo.addItems(FORMATS)
-        self.formatCombo.setFixedWidth(130)
-        self.formatCombo.setToolTip("全局默认数据类型（右键单元格可逐格设置）")
-        self.formatCombo.currentIndexChanged.connect(self._on_format_changed)
-        bar.addWidget(self.formatCombo)
-        readBtn = ToolButton(FluentIcon.UPDATE, card)
-        readBtn.setToolTip("立即读取一次")
-        readBtn.clicked.connect(self._do_read)
-        bar.addWidget(readBtn)
-        bar.addStretch(1)
+        bar.addWidget(SubtitleLabel("读写配置", card))
         self.resultInfo = CaptionLabel("", card)
         bar.addWidget(self.resultInfo)
+        bar.addStretch(1)
+        importBtn = ToolButton(FluentIcon.FOLDER, card)
+        importBtn.setToolTip("配置导入")
+        importBtn.clicked.connect(lambda _=False: self._import_config())
+        bar.addWidget(importBtn)
+        exportBtn = ToolButton(FluentIcon.SAVE, card)
+        exportBtn.setToolTip("配置导出")
+        exportBtn.clicked.connect(lambda _=False: self._export_config())
+        bar.addWidget(exportBtn)
         v.addLayout(bar)
+
         self.table = TableWidget(card)
-        # 网格：每列 10 格，列头 = 组起始地址，行头 = 组内偏移 0~9
-        self.table.setRowCount(ROWS_PER_GROUP)
-        self.table.setColumnCount(0)
-        self.table.setVerticalHeaderLabels(
-            [str(i) for i in range(ROWS_PER_GROUP)])
-        self.table.setFont(QFont("Consolas", 10))
+        self.table.setColumnCount(10)
+        self.table.setHorizontalHeaderLabels([
+            "是否启用", "从站地址", "数据地址", "功能码", "数据类型",
+            "别名", "数据", "间隔时间", "读取", "写入"])
+        self.table.verticalHeader().setVisible(False)
         self.table.setEditTriggers(
-            QAbstractItemView.EditTrigger.DoubleClicked)
+            QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(
-            QAbstractItemView.SelectionBehavior.SelectItems)
+            QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setHorizontalScrollBarPolicy(
-            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.table.itemChanged.connect(self._on_item_changed)
-        self.table.cellDoubleClicked.connect(self._on_cell_double_clicked)
-        self.table.setContextMenuPolicy(
-            Qt.ContextMenuPolicy.CustomContextMenu)
-        self.table.customContextMenuRequested.connect(self._on_context_menu)
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        hh = self.table.horizontalHeader()
+        hh.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        for c, w in enumerate([80, 86, 96, 150, 138, 130, 140, 104, 62, 62]):
+            self.table.setColumnWidth(c, w)
         v.addWidget(self.table, 1)
+
+        brow = QHBoxLayout()
+        addBtn = PushButton(FluentIcon.ADD, "添加", card)
+        addBtn.clicked.connect(lambda _=False: self._add_row())
+        delBtn = PushButton(FluentIcon.DELETE, "删除选中", card)
+        delBtn.clicked.connect(lambda _=False: self._delete_selected())
+        brow.addWidget(addBtn)
+        brow.addWidget(delBtn)
+        brow.addStretch(1)
+        hint = CaptionLabel(
+            "勾选启用且为读功能码的行按间隔自动轮询；「读取 / 写入」立即执行。",
+            card)
+        brow.addWidget(hint)
+        v.addLayout(brow)
         return card
 
     # ── 右：通信监视 ───────────────────────────────────────────
@@ -342,19 +438,8 @@ class ModbusPage(QWidget):
         self.connectBtn.clicked.connect(self._on_connect)
         self.closeBtn.clicked.connect(lambda _=False: self.mt.sigClose.emit())
         self._pollTimer = QTimer(self)
-        self._pollTimer.timeout.connect(self._do_read)
-        self.pollSwitch.checkedChanged.connect(self._on_poll_toggled)
-        self.fcCombo.currentIndexChanged.connect(self._on_definition_changed)
-        self.addrBox.valueChanged.connect(self._on_definition_changed)
-        self.countBox.valueChanged.connect(self._on_definition_changed)
-        self.pollBox.valueChanged.connect(self._on_definition_changed)
-
-    def _on_definition_changed(self, *_):
-        """定义变更后立即读一次并按新间隔重启轮询。"""
-        if self._connected:
-            self._do_read()
-            if self.pollSwitch.isChecked():
-                self._pollTimer.start(max(100, self.pollBox.value()))
+        self._pollTimer.setInterval(200)
+        self._pollTimer.timeout.connect(self._poll_tick)
 
     # ── 连接 ───────────────────────────────────────────────────
 
@@ -391,10 +476,10 @@ class ModbusPage(QWidget):
         self._set_connected_ui(True)
         self.statusLabel.setText(msg)
         self._trace(f"已连接：{msg}")
-        # 连接成功：按定义立即读一次并启动自动轮询
-        self._do_read()
-        if self.pollSwitch.isChecked():
-            self._pollTimer.start(max(100, self.pollBox.value()))
+        # 重置各行轮询计时基准并启动自动轮询
+        for row in self._rows:
+            row["last_poll"] = time.monotonic()
+        self._pollTimer.start()
 
     def _on_connect_failed(self, msg: str):
         self.connectBtn.setEnabled(True)
@@ -409,263 +494,404 @@ class ModbusPage(QWidget):
             self.statusLabel.setText("未连接")
             self._pollTimer.stop()
 
-    # ── 读取 ───────────────────────────────────────────────────
+    # ── 读写配置表 ─────────────────────────────────────────────
 
-    def _current_fc(self) -> int:
-        return READ_FCS.get(self.fcCombo.currentText(), 3)
+    def _add_row(self, cfg: dict = None):
+        """追加一行配置（cfg 缺失时用默认值），并建立行内控件。"""
+        if cfg is None:
+            cfg = dict(DEFAULT_ROW)
+        row = dict(cfg)
+        row["last_poll"] = 0.0
+        idx = len(self._rows)
+        self._rows.append(row)
+        t = self.table
+        t.insertRow(idx)
+        t.setRowHeight(idx, 38)
+        item = QTableWidgetItem()
+        item.setFlags(Qt.ItemFlag.NoItemFlags)
+        t.setItem(idx, 0, item)
+        t.setCellWidget(idx, 0, self._mk_enabled(idx, row))
+        t.setCellWidget(idx, 1, self._mk_slave(idx, row))
+        t.setCellWidget(idx, 2, self._mk_addr(idx, row))
+        t.setCellWidget(idx, 3, self._mk_fc(idx, row))
+        t.setCellWidget(idx, 4, self._mk_dtype(idx, row))
+        t.setCellWidget(idx, 5, self._mk_alias(idx, row))
+        t.setCellWidget(idx, 6, self._mk_value(idx, row))
+        t.setCellWidget(idx, 7, self._mk_interval(idx, row))
+        t.setCellWidget(idx, 8, self._mk_action(idx, "读取", self._row_read))
+        t.setCellWidget(idx, 9, self._mk_action(idx, "写入", self._row_write))
+        # 输入控件焦点监听：聚焦视为编辑中，暂停该行自动轮询
+        watcher = _RowFocusWatcher(idx, self)
+        for c in range(1, 8):
+            w = t.cellWidget(idx, c)
+            if w is not None:
+                w.installEventFilter(watcher)
+        row["_watcher"] = watcher
 
-    def _do_read(self):
-        if not self._connected:
-            self._pollTimer.stop()
+    def _set_row(self, idx: int, field: str, value):
+        self._rows[idx][field] = value
+        if field in ("interval", "enabled"):
+            # 间隔/启用变更：重置计时基准，避免刚改完立即读
+            self._rows[idx]["last_poll"] = time.monotonic()
+
+    def _on_row_editing(self, idx: int):
+        """行内输入控件获得焦点：编辑期间暂停自动读取，并关闭该行启用勾选。"""
+        if not (0 <= idx < len(self._rows)):
             return
-        req = {
-            "fc": self._current_fc(),
-            "addr": self.addrBox.value(),
-            "count": self.countBox.value(),
-            "slave": self.slaveBox.value(),
-        }
-        self._trace(f"TX  FC{req['fc']:02d} @{req['addr']} ×{req['count']} "
-                    f"(从站 {req['slave']})")
-        self.mt.sigRead.emit(req)
+        row = self._rows[idx]
+        if row["enabled"]:
+            row["enabled"] = False
+            cb = self.table.cellWidget(idx, 0)
+            if cb is not None:
+                cb.blockSignals(True)
+                cb.setChecked(False)
+                cb.blockSignals(False)
 
-    def _on_poll_toggled(self, on: bool):
-        if on:
-            if not self._connected:
-                # 未连接：保留"开"状态但不启动轮询，
-                # 连接成功后由 _on_connected 按开关状态启动
-                return
-            self._pollTimer.start(max(100, self.pollBox.value()))
-        else:
-            self._pollTimer.stop()
+    def _mk_enabled(self, idx: int, row: dict):
+        cb = CheckBox(self.table)
+        cb.setChecked(bool(row["enabled"]))
+        cb.toggled.connect(lambda on, i=idx: self._set_row(i, "enabled", on))
+        return cb
 
-    # ── 数据表 ─────────────────────────────────────────────────
+    def _no_text_cursor(self, w):
+        """悬浮显示箭头光标而非文本光标（点击聚焦后才进入输入态）。"""
+        # LineEdit / ComboBox：直接设置
+        w.setCursor(Qt.CursorShape.ArrowCursor)
+        # SpinBox 内部编辑区也要改（qfluentwidgets 显式设了 IBeamCursor）
+        inner = getattr(w, "lineEdit", None)
+        if callable(inner):
+            le = inner()
+            if le is not None:
+                le.setCursor(Qt.CursorShape.ArrowCursor)
+
+    def _mk_slave(self, idx: int, row: dict):
+        sb = SpinBox(self.table)
+        sb.setRange(0, 247)
+        sb.setValue(int(row["slave"]))
+        sb.setFixedHeight(30)
+        # 地址类输入：隐藏上下箭头（qfluentwidgets 自定义绘制，需 setSymbolVisible）
+        sb.setSymbolVisible(False)
+        # 悬浮不显示文本光标（点击聚焦才进入输入态）
+        self._no_text_cursor(sb)
+        sb.valueChanged.connect(lambda v, i=idx: self._set_row(i, "slave", v))
+        return sb
+
+    def _mk_addr(self, idx: int, row: dict):
+        ed = LineEdit(self.table)
+        ed.setText(str(row["addr"]))
+        ed.setFixedHeight(30)
+        ed.setPlaceholderText("十进制或 0x 十六进制")
+        ed.setClearButtonEnabled(False)
+        # 只允许十进制数字或 0x 十六进制（含输入中间态 0x / 0X）
+        ed.setValidator(QRegularExpressionValidator(
+            QRegularExpression(r"(0[xX][0-9a-fA-F]{0,4}|\d{0,5})"), ed))
+        self._no_text_cursor(ed)
+        ed.textChanged.connect(lambda t, i=idx: self._on_addr_edited(i, t))
+        return ed
+
+    def _on_addr_edited(self, idx: int, text: str):
+        """地址列文本解析：十进制或 0x 十六进制，范围 0–65535，非法保持旧值。"""
+        t = text.strip()
+        if not t:
+            return
+        try:
+            v = int(t, 16) if t.lower().startswith("0x") else int(t, 10)
+        except ValueError:
+            return
+        if 0 <= v <= 65535:
+            self._set_row(idx, "addr", v)
+
+    def _mk_fc(self, idx: int, row: dict):
+        cb = ComboBox(self.table)
+        for name, code in FC_ITEMS:
+            # qfluentwidgets addItem(text, icon=None, userData=None)：
+            # 码值必须走 userData，放第二参数会被当 icon
+            cb.addItem(name, userData=code)
+        try:
+            cb.setCurrentIndex(FC_CODES.index(int(row["fc"])))
+        except ValueError:
+            cb.setCurrentIndex(2)  # 默认 03
+        cb.setFixedHeight(30)
+        self._no_text_cursor(cb)
+        cb.currentIndexChanged.connect(lambda _n, i=idx: self._on_fc_changed(i))
+        return cb
+
+    def _mk_dtype(self, idx: int, row: dict):
+        cb = ComboBox(self.table)
+        for name in DT_NAMES:
+            cb.addItem(name, userData=DT_IDS[name])
+        cb.setCurrentIndex(self._dtype_index(row["dtype"]))
+        cb.setFixedHeight(30)
+        self._no_text_cursor(cb)
+        cb.currentIndexChanged.connect(lambda _n, i=idx: self._on_dtype_changed(i))
+        return cb
+
+    def _on_dtype_changed(self, idx: int):
+        cb = self.table.cellWidget(idx, 4)
+        self._rows[idx]["dtype"] = cb.currentData()  # 内部标识
+
+    def _mk_alias(self, idx: int, row: dict):
+        ed = LineEdit(self.table)
+        ed.setText(row["alias"])
+        ed.setFixedHeight(30)
+        ed.setPlaceholderText("别名")
+        self._no_text_cursor(ed)
+        ed.textChanged.connect(
+            lambda t, i=idx: self._set_row(i, "alias", t))
+        return ed
+
+    def _mk_value(self, idx: int, row: dict):
+        ed = LineEdit(self.table)
+        ed.setText(str(row["value"]))
+        ed.setFixedHeight(30)
+        ed.setPlaceholderText("数据")
+        self._no_text_cursor(ed)
+        ed.textChanged.connect(
+            lambda t, i=idx: self._set_row(i, "value", t))
+        return ed
+
+    def _mk_interval(self, idx: int, row: dict):
+        sb = SpinBox(self.table)
+        sb.setRange(50, 600_000)
+        sb.setValue(int(row["interval"]))
+        sb.setSuffix(" ms")
+        sb.setFixedHeight(30)
+        self._no_text_cursor(sb)
+        sb.valueChanged.connect(
+            lambda v, i=idx: self._set_row(i, "interval", v))
+        return sb
+
+    def _mk_action(self, idx: int, text: str, slot):
+        btn = PushButton(text, self.table)
+        btn.setFixedHeight(30)
+        btn.clicked.connect(lambda _=False, i=idx: slot(i))
+        return btn
+
+    def _on_fc_changed(self, idx: int):
+        cb = self.table.cellWidget(idx, 3)
+        code = cb.currentData()
+        self._rows[idx]["fc"] = code
+        is_read = code <= 4
+        read_btn = self.table.cellWidget(idx, 8)
+        write_btn = self.table.cellWidget(idx, 9)
+        if read_btn is not None:
+            read_btn.setEnabled(is_read)
+        if write_btn is not None:
+            write_btn.setEnabled(not is_read)
+
+    def _delete_selected(self):
+        # 用 selectionModel 取选中行（col0 占位 item 无 flags，selectedItems 为空）
+        sm = self.table.selectionModel()
+        rows = sorted({i.row() for i in sm.selectedRows()}, reverse=True)
+        if not rows:
+            InfoBar.warning(title="未选中", content="请先选中要删除的行",
+                            duration=3000, parent=self)
+            return
+        for r in rows:
+            self.table.removeRow(r)
+            self._rows.pop(r)
+
+    def _export_config(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self, "配置导出", "modbus_config.json", "JSON 文件 (*.json)")
+        if not path:
+            return
+        data = {"rows": [
+            {k: v for k, v in row.items() if not k.startswith("_")}
+            for row in self._rows]}
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except OSError as e:
+            InfoBar.error(title="配置导出失败", content=str(e),
+                          duration=5000, parent=self)
+            return
+        InfoBar.success(title="配置导出",
+                        content=f"已导出 {len(self._rows)} 行 → {path}",
+                        duration=4000, parent=self)
+
+    def _import_config(self):
+        """从导出的 JSON 文件导入整表配置（替换当前表格）。"""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "配置导入", "", "JSON 文件 (*.json)")
+        if not path:
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError) as e:
+            InfoBar.error(title="配置导入失败", content=str(e),
+                          duration=5000, parent=self)
+            return
+        raw_rows = data.get("rows") if isinstance(data, dict) else None
+        if not isinstance(raw_rows, list) or not raw_rows:
+            InfoBar.warning(title="配置导入失败",
+                            content="文件中没有有效的 rows 配置",
+                            duration=4000, parent=self)
+            return
+        # 只接受含任一配置字段的行，纯噪音对象（如 {"foo": 1}）跳过
+        valid_keys = {"enabled", "slave", "addr", "fc", "dtype",
+                      "alias", "value", "interval"}
+        rows = [self._sanitize_row(r) for r in raw_rows
+                if isinstance(r, dict) and (set(r) & valid_keys)]
+        if not rows:
+            InfoBar.warning(title="配置导入失败",
+                            content="文件中没有可用的配置行",
+                            duration=4000, parent=self)
+            return
+        # 替换整表
+        for r in range(len(self._rows) - 1, -1, -1):
+            self.table.removeRow(r)
+        self._rows.clear()
+        for r in rows:
+            self._add_row(r)
+        # 已连接时重置轮询计时基准，避免导入后立即触发轮询
+        now = time.monotonic()
+        for row in self._rows:
+            row["last_poll"] = now if self._connected else 0.0
+        InfoBar.success(title="配置导入",
+                        content=f"已导入 {len(self._rows)} 行 ← {path}",
+                        duration=4000, parent=self)
+
+    @staticmethod
+    def _dtype_index(dtype: str) -> int:
+        """任意 dtype 表示（内部标识/旧标识）→ 下拉索引，未知回退 0。"""
+        dtype = _DTYPE_ALIAS.get(dtype, dtype)
+        for i, (_name, _id, _n) in enumerate(DT_ITEMS):
+            if _id == dtype:
+                return i
+        return 0
+
+    @staticmethod
+    def _dtype_id(value) -> str:
+        """任意 dtype 表示（内部标识/旧标识/显示名）→ 内部标识，非法回退 uint16。"""
+        if isinstance(value, str):
+            value = _DTYPE_ALIAS.get(value, value)
+            if value in DT_SIZES:
+                return value
+            for name, _id, _n in DT_ITEMS:
+                if name == value:
+                    return _id
+        return "uint16"
+
+    @staticmethod
+    def _sanitize_row(r: dict) -> dict:
+        """导入行字段清洗：类型强转 + 范围钳制，非法值回退默认。"""
+        row = dict(DEFAULT_ROW)
+        try:
+            en = r.get("enabled", True)
+            if isinstance(en, str):
+                row["enabled"] = en.strip().lower() in ("1", "true", "yes", "on")
+            else:
+                row["enabled"] = bool(en)
+            row["slave"] = max(0, min(247, int(r.get("slave", 1))))
+            row["addr"] = max(0, min(65535, int(r.get("addr", 0))))
+            fc = int(r.get("fc", 3))
+            row["fc"] = fc if fc in FC_CODES else 3
+            row["dtype"] = ModbusPage._dtype_id(r.get("dtype", "uint16"))
+            row["alias"] = str(r.get("alias", ""))
+            row["value"] = str(r.get("value", ""))
+            row["interval"] = max(50, min(600_000, int(r.get("interval", 1000))))
+        except (TypeError, ValueError):
+            pass
+        return row
+
+    # ── 读取 / 写入 ────────────────────────────────────────────
+
+    def _row_read(self, idx: int):
+        row = self._rows[idx]
+        if not self._connected:
+            return
+        fc = row["fc"]
+        if fc not in (1, 2, 3, 4):
+            return
+        count = DT_SIZES.get(row["dtype"], 1)
+        if row["dtype"] == "bin":
+            # bin 模式：按「数据」列字节数推寄存器数（每寄存器 2 字节）
+            try:
+                raw = bytes.fromhex(str(row["value"]).replace(" ", ""))
+                count = max(1, (len(raw) + 1) // 2)
+            except ValueError:
+                count = 1
+        name = row["alias"] or f"@{row['addr']}"
+        self._trace(f"TX  FC{fc:02d} @{row['addr']} ×{count} "
+                    f"(从站 {row['slave']} · {name})")
+        self.mt.sigRead.emit({
+            "fc": fc, "addr": row["addr"], "count": count,
+            "slave": row["slave"]})
+
+    def _row_write(self, idx: int):
+        row = self._rows[idx]
+        if not self._connected:
+            return
+        fc = row["fc"]
+        if fc not in (5, 6, 15, 16):
+            return
+        text = str(row["value"]).strip()
+        try:
+            if fc == 5:
+                up = text.upper()
+                if up not in ("ON", "OFF", "1", "0"):
+                    raise ValueError("线圈值需为 ON/OFF/1/0")
+                values = [1 if up in ("ON", "1") else 0]
+            elif fc == 15:
+                parts = [p.strip() for p in text.split(",") if p.strip()]
+                if not parts:
+                    raise ValueError("线圈列表为空")
+                values = [1 if p.upper() in ("ON", "1") else 0
+                          for p in parts]
+            else:
+                values = encode_value(text, row["dtype"])
+                if fc == 6:
+                    values = values[:1]   # 单寄存器
+        except (ValueError, OverflowError) as e:
+            InfoBar.warning(title="写入值无效",
+                            content=str(e) or "解析失败",
+                            duration=4000, parent=self)
+            return
+        name = row["alias"] or f"@{row['addr']}"
+        self._trace(f"TX  FC{fc:02d} @{row['addr']} = {values} "
+                    f"(从站 {row['slave']} · {name})")
+        self.mt.sigWrite.emit({
+            "fc": fc, "addr": row["addr"], "values": values,
+            "slave": row["slave"]})
+
+    def _poll_tick(self):
+        """按各行间隔轮询启用且为读功能码的行。"""
+        if not self._connected:
+            return
+        now = time.monotonic()
+        for idx, row in enumerate(self._rows):
+            if not row["enabled"] or row["fc"] not in (1, 2, 3, 4):
+                continue
+            if now - row["last_poll"] >= max(0.05, row["interval"] / 1000):
+                row["last_poll"] = now
+                self._row_read(idx)
 
     def _on_read_result(self, r: dict):
-        self._last_read = r
-        vals = " ".join(f"{v:04X}" for v in r["values"]) if r["fc"] in (3, 4) \
+        vals = " ".join(f"{v:04X}" for v in r["values"]) \
+            if r["fc"] in (3, 4) \
             else "".join("1" if v else "0" for v in r["values"])
         self._trace(f"RX  FC{r['fc']:02d} @{r['addr']} ×{len(r['values'])}  "
                     f"{r['ms']} ms  [{vals}]")
         self.resultInfo.setText(
             f"FC{r['fc']:02d} @ {r['addr']} ×{len(r['values'])}  {r['ms']} ms")
-        self._refill_table()
-
-    def _on_format_changed(self, _=0):
-        """全局格式变更：清空逐格覆盖后重刷。"""
-        self._cell_fmt.clear()
-        self._refill_table()
-
-    def _effective_fmts(self, base: int, n: int):
-        """计算读区间内每格的生效类型。
-
-        返回 (fmt_map, cont_set)：fmt_map {地址: 格式} 覆盖起始格/单词格，
-        cont_set 为双字类型的延续格地址（显示占位、只读）。
-        """
-        gfmt = self.formatCombo.currentText()
-        fmts = {}
-        conts = set()
-        # 逐格覆盖优先
-        for a, f in self._cell_fmt.items():
-            if base <= a < base + n:
-                fmts[a] = f
-                if f in PAIR_FMTS and base <= a + 1 < base + n:
-                    conts.add(a + 1)
-        if gfmt in PAIR_FMTS:
-            # 全局双字：按读顺序两两配对，跳过已被覆盖/延续的地址
-            i = 0
-            while i < n:
-                a = base + i
-                if a in fmts or a in conts:
-                    i += 1
-                    continue
-                fmts[a] = gfmt
-                if base <= a + 1 < base + n and a + 1 not in fmts:
-                    conts.add(a + 1)
-                i += 2
-        else:
-            for i in range(n):
-                a = base + i
-                if a not in fmts and a not in conts:
-                    fmts[a] = gfmt
-        return fmts, conts
-
-    def _refill_table(self):
-        r = self._last_read
-        if not r:
-            return
-        fc = r["fc"]
-        base = r["addr"]
-        values = r["values"]
-        n = len(values)
-        cols = max(1, (n + ROWS_PER_GROUP - 1) // ROWS_PER_GROUP)
-        fmts, conts = self._effective_fmts(base, n)
-        t = self.table
-        t.blockSignals(True)
-        t.setColumnCount(cols)
-        t.setRowCount(ROWS_PER_GROUP)
-        t.setHorizontalHeaderLabels(
-            [f"{base + c * ROWS_PER_GROUP:05d}" for c in range(cols)])
-        hh = t.horizontalHeader()
-        for c in range(cols):
-            hh.setSectionResizeMode(c, QHeaderView.ResizeMode.Stretch)
-        for c in range(cols):
-            for row in range(ROWS_PER_GROUP):
-                idx = c * ROWS_PER_GROUP + row
-                addr = base + idx
-                if idx >= n:
-                    item = QTableWidgetItem("")
-                    item.setFlags(Qt.ItemFlag.NoItemFlags)
-                elif addr in conts:
-                    item = QTableWidgetItem("↳")
-                    item.setFlags(Qt.ItemFlag.ItemIsEnabled
-                                  | Qt.ItemFlag.ItemIsSelectable)
-                    item.setForeground(QColor(128, 128, 128))
-                    item.setTextAlignment(
-                        Qt.AlignmentFlag.AlignCenter)
-                else:
-                    fmt = fmts.get(addr, "Unsigned")
-                    if fc in (1, 2):
-                        text = "ON" if values[idx] else "OFF"
-                    elif fmt in PAIR_FMTS:
-                        hi = values[idx]
-                        lo = values[idx + 1] if idx + 1 < n else 0
-                        text = (format_float_pair(hi, lo)
-                                if fmt.startswith("Float")
-                                else format_ascii_pair(hi, lo))
-                    else:
-                        text = format_value(values[idx], fmt)
-                    item = QTableWidgetItem(text)
-                    flags = (Qt.ItemFlag.ItemIsEnabled
-                             | Qt.ItemFlag.ItemIsSelectable)
-                    # 可写：线圈 FC1 / 保持寄存器 FC3 的单词格
-                    if fc in (1, 3) and fmt not in PAIR_FMTS:
-                        flags |= Qt.ItemFlag.ItemIsEditable
-                    item.setFlags(flags)
-                    item.setTextAlignment(
-                        Qt.AlignmentFlag.AlignRight
-                        | Qt.AlignmentFlag.AlignVCenter)
-                t.setItem(row, c, item)
-        t.blockSignals(False)
-
-    def _on_context_menu(self, pos):
-        """右键单元格 → 设置该格数据类型。"""
-        r = self._last_read
-        item = self.table.itemAt(pos)
-        if not r or item is None:
-            return
-        addr = cell_address(r["addr"], item.row(), item.column())
-        if addr >= r["addr"] + len(r["values"]):
-            return
-        menu = RoundMenu(title=f"地址 {addr} 的数据类型", parent=self)
-        for name in FORMATS:
-            menu.addAction(Action(
-                name,
-                triggered=lambda _=False, a=addr, f=name:
-                    self._set_cell_fmt(a, f)))
-        if addr in self._cell_fmt:
-            menu.addSeparator()
-            menu.addAction(Action(
-                "恢复默认",
-                triggered=lambda _=False, a=addr:
-                    self._set_cell_fmt(a, None)))
-        menu.exec(self.table.viewport().mapToGlobal(pos))
-
-    def _set_cell_fmt(self, addr: int, fmt):
-        if fmt is None:
-            self._cell_fmt.pop(addr, None)
-        else:
-            self._cell_fmt[addr] = fmt
-        self._refill_table()
-
-    def _on_cell_double_clicked(self, row: int, col: int):
-        """双击：双字格（Float/ASCII）弹对话框写入，单词格走格内编辑。"""
-        r = self._last_read
-        if not r or not self._connected or r["fc"] != 3:
-            return
-        addr = cell_address(r["addr"], row, col)
-        idx = addr - r["addr"]
-        if idx < 0 or idx >= len(r["values"]):
-            return
-        fmts, conts = self._effective_fmts(r["addr"], len(r["values"]))
-        fmt = fmts.get(addr)
-        if addr in conts or fmt not in PAIR_FMTS:
-            return
-        is_float = fmt.startswith("Float")
-        hi = r["values"][idx]
-        lo = r["values"][idx + 1] if idx + 1 < len(r["values"]) else 0
-        current = (format_float_pair(hi, lo) if is_float
-                   else format_ascii_pair(hi, lo))
-        dlg = QDialog(self)
-        dlg.setWindowTitle("写入 Float" if is_float else "写入 ASCII")
-        dv = QVBoxLayout(dlg)
-        dv.addWidget(BodyLabel(
-            f"地址 {addr}（占 2 个寄存器，FC16 写入）", dlg))
-        edit = LineEdit(dlg)
-        edit.setText(current)
-        dv.addWidget(edit)
-        ok = PrimaryPushButton("写入", dlg)
-        ok.clicked.connect(dlg.accept)
-        dv.addWidget(ok)
-        if not dlg.exec():
-            return
-        text = edit.text().strip()
-        try:
-            hi, lo = (parse_float_pair(text) if is_float
-                      else parse_ascii_pair(text))
-        except (ValueError, OverflowError):
-            InfoBar.warning(title="数值无效", content="写入值解析失败",
-                            duration=3000, parent=self)
-            return
-        req = {"fc": 16, "addr": addr, "values": [hi, lo],
-               "slave": self.slaveBox.value()}
-        self._trace(f"TX  FC16 @{addr} = [{hi:04X} {lo:04X}]")
-        self.mt.sigWrite.emit(req)
-
-    def _on_item_changed(self, item: QTableWidgetItem):
-        """格内编辑 → 写入（保持寄存器 FC06 / 线圈 FC05）。"""
-        r = self._last_read
-        if not r or not self._connected:
-            return
-        fc = r["fc"]
-        if fc in (2, 4):            # 离散输入/输入寄存器只读
-            self._refill_table()
-            return
-        addr = cell_address(r["addr"], item.row(), item.column())
-        if addr >= r["addr"] + len(r["values"]):
-            self._refill_table()
-            return
-        text = item.text().strip()
-        try:
-            if fc == 1:
-                if text.upper() not in ("ON", "OFF", "0", "1"):
-                    raise ValueError
-                value = 1 if text.upper() in ("ON", "1") else 0
-                req = {"fc": 5, "addr": addr, "values": [value],
-                       "slave": self.slaveBox.value()}
-            else:
-                fmt = self._cell_fmt.get(
-                    addr, self.formatCombo.currentText())
-                if fmt == "Hex":
-                    value = int(text, 16)
-                else:
-                    value = int(text, 0)
-                req = {"fc": 6, "addr": addr,
-                       "values": [value & 0xFFFF],
-                       "slave": self.slaveBox.value()}
-        except ValueError:
-            InfoBar.warning(title="数值无效", content="写入值解析失败，已还原",
-                            duration=3000, parent=self)
-            self._refill_table()
-            return
-        self._trace(f"TX  FC{req['fc']:02d} @{addr} = {req['values'][0]}")
-        self.mt.sigWrite.emit(req)
+        # 回填第一个匹配的读行「数据」列
+        for idx, row in enumerate(self._rows):
+            if row["fc"] == r["fc"] and row["addr"] == r["addr"]:
+                try:
+                    text = decode_value(r["values"], row["dtype"])
+                except (ValueError, OverflowError, IndexError):
+                    text = "?"
+                ed = self.table.cellWidget(idx, 6)
+                if ed is not None:
+                    ed.setText(text)
+                break
 
     def _on_write_result(self, r: dict):
         self.resultInfo.setText(
             f"FC{r['fc']:02d} 写 @{r['addr']} ×{r['count']} 完成")
         self._trace(f"RX  FC{r['fc']:02d} 写成功 @{r['addr']} ×{r['count']}")
-        # 写入后立即回读刷新
-        self._do_read()
 
     # ── 日志 ───────────────────────────────────────────────────
 

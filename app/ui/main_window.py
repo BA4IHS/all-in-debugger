@@ -26,6 +26,7 @@ from app.ui.preset_page import PresetPage
 from app.ui.setting_page import SettingPage
 from app.ui.ssh_page import SshPage
 from app.ui.tcpip_page import TcpipPage
+from app.ui.tools_page import ToolsPage
 from app.ui.window_utils import center_window
 
 ANDROID_ICON_PATH = (
@@ -96,6 +97,7 @@ class MainWindow(SplitFluentWindow):
         self.modbusPage = ModbusPage(self.mt)
         self.sshPage = SshPage(self.sht)
         self.tcpipPage = TcpipPage(self.tp)
+        self.toolsPage = ToolsPage()
         self.settingPage = SettingPage()
         self.consolePage.setObjectName("consoleInterface")
         self.presetPage.setObjectName("presetInterface")
@@ -105,7 +107,7 @@ class MainWindow(SplitFluentWindow):
         self.modbusPage.setObjectName("modbusInterface")
         self.sshPage.setObjectName("sshInterface")
         self.tcpipPage.setObjectName("tcpipInterface")
-        # settingInterface 的 objectName 已在 SettingPage 内设置
+        # toolsInterface / settingInterface 的 objectName 已在页内设置
 
         self.addSubInterface(self.consolePage, FluentIcon.IOT, "串口调试")
         self.addSubInterface(self.presetPage, FluentIcon.LIBRARY, "预设命令")
@@ -115,6 +117,7 @@ class MainWindow(SplitFluentWindow):
         self.addSubInterface(self.modbusPage, FluentIcon.LINK, "Modbus")
         self.addSubInterface(self.sshPage, FluentIcon.GLOBE, "SSH")
         self.addSubInterface(self.tcpipPage, FluentIcon.WIFI, "网络调试")
+        self.addSubInterface(self.toolsPage, FluentIcon.APPLICATION, "小工具")
         self.addSubInterface(
             self.settingPage, FluentIcon.SETTING, "设置",
             position=NavigationItemPosition.BOTTOM)
@@ -201,6 +204,7 @@ class MainWindow(SplitFluentWindow):
         self.modbusPage.shutdown()
         self.sshPage.shutdown()
         self.tcpipPage.shutdown()
+        self.toolsPage.shutdown()
         self.settingPage.shutdown()
         self.st.stop()
         self.ht.stop()

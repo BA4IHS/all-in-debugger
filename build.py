@@ -18,7 +18,7 @@
     - 体积优化：--lto=yes + 排除 Qt tls 插件/翻译 + 裁剪无用图片格式插件
 
 前置要求：
-    - Python 3.10+（本机 C:\\Users\\admin\\AppData\\Local\\Programs\\Python\\Python310）
+    - Python 3.10+（需在 PATH 中可执行）
     - C 编译器：MSVC（Visual Studio Build Tools）或 MinGW64；
       Nuitka 未检测到编译器时会按 --assume-yes-for-downloads 自动下载 MinGW64
     - 首次打包需联网（下载插件/依赖）
