@@ -25,6 +25,12 @@ from app.ui.window_utils import center_window
 
 CREATE_NO_WINDOW = 0x08000000
 
+# 打包检测：Nuitka 不设置 sys.frozen（PyInstaller 才设），它在每个编译模块的
+# globals 里注入 __compiled__ 标记；两者任一命中即视为打包运行。
+# 误判代价严重：走错分支会用 `-m` 方式 spawn 自身 exe，被 Nuitka 的
+# 自我调用防护立即终止（退出码 2），加载动画静默消失。
+_FROZEN = getattr(sys, "frozen", False) or "__compiled__" in globals()
+
 
 def _spawn_splash_proc():
     """启动独立加载动画进程。
@@ -33,19 +39,27 @@ def _spawn_splash_proc():
     冻结；独立进程渲染的转圈不受影响，等同 Win11 启动动画体验。
 
     - 源码运行：python -m app.ui.splash_proc <父PID>
-    - 打包运行：派生自身 exe（--splash-proc <父PID>，main() 入口分流），
-      Nuitka 产物内无独立 python 解释器，spawn 自身是唯一途径；
-      standalone 模式无解压开销，重复启动仅多一次 Qt 库加载
+    - 打包运行：派生自身 exe（--splash-proc <父PID>，main() 入口分流）。
+      注意两个 Nuitka 陷阱（均已实测踩中）：
+      1) sys.executable 被伪装成 <dist>/python.exe 且该文件不存在，
+         直接 Popen 会 FileNotFoundError → 必须用 sys.argv[0] 取真实 exe；
+      2) 用 `-m` 方式 spawn 自身会被 Nuitka 自我调用防护立即终止
+         （退出码 2）→ 必须走 --splash-proc 入口分流。
     spawn 失败返回 None，由 main() 回退为主窗口内嵌遮罩方案。
     """
-    if getattr(sys, "frozen", False):
-        args = [sys.executable, "--splash-proc", str(os.getpid())]
+    if _FROZEN:
+        exe = os.path.abspath(sys.argv[0])
+        if not os.path.isfile(exe):
+            return None
+        args = [exe, "--splash-proc", str(os.getpid())]
+        cwd = os.path.dirname(exe)   # exe 目录（终端用户机器上源码路径不存在）
     else:
         args = [sys.executable, "-m", "app.ui.splash_proc", str(os.getpid())]
+        cwd = str(ROOT)              # -m 模块解析需要 cwd 在包根目录
     try:
         return subprocess.Popen(
             args,
-            cwd=str(ROOT),
+            cwd=cwd,
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             creationflags=CREATE_NO_WINDOW)

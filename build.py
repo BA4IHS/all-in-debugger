@@ -38,7 +38,7 @@ except (AttributeError, ValueError):
 
 ROOT = Path(__file__).resolve().parent
 ENTRY = ROOT / "main.py"
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 
 # 输出目录名 = 入口模块名 + ".dist"（与既有 dist/main.dist 结构一致）
 DIST_DIR = ROOT / "dist"
@@ -66,6 +66,10 @@ def build_args() -> list:
         # 后分流到该模块；函数内 import Nuitka 可静态跟踪，此处显式
         # include 兑现包安全，防止优化裁剪）
         "--include-module=app.ui.splash_proc",
+        # 业务包整包跟随：延迟页面构造后 8 个页面均经
+        # importlib.import_module 动态加载（main_window.py _LAZY_BATCHES），
+        # Nuitka 静态分析跟踪不到，不显式 include 会全部丢失
+        "--include-package=app",
         # ---- 业务数据（frozen 模式下由 sys.executable / __file__ 定位）----
         # hidapi.dll + 官方 adb 三件套（app/native.py 的 LIBS_DIR）
         "--include-data-dir=app/libs=app/libs",
@@ -274,8 +278,48 @@ def make_archive():
     print(f"[build] 归档完成：{target}")
 
 
+def check_lazy_modules():
+    """验证延迟构造页面模块已编译进 exe。
+
+    8 个延迟页面经 importlib.import_module 动态加载，Nuitka 静态分析
+    跟踪不到；若构建参数缺失 --include-package=app，运行时 import
+    失败会被 except 吞掉，侧栏只剩串口页（静默缺失，很难排查）。
+    这里扫描 exe 常量池中各模块的特征字符串，缺失即显式报错。
+    （模块名本身不可靠：_LAZY_BATCHES 表的字符串也会进 exe。）
+    """
+    exe_path = BUNDLE_DIR / "all-in-debugger.exe"
+    if not exe_path.is_file():
+        print(f"[build] 警告：未找到 {exe_path}，跳过延迟模块检查", file=sys.stderr)
+        return False
+    data = exe_path.read_bytes()
+    # 模块 → 仅存在于该模块源码中的特征字符串（选长且独特的 UI 文案）
+    feats = {
+        "app.ui.preset_page": "导入预设命令",
+        "app.ui.adb_page": "设备型号 (命令集)",
+        "app.ui.modbus_page": "读写配置",
+        "app.ui.setting_page": "使用的框架及开源项目",
+        "app.ui.splash_proc": "正在启动 all-in-debugger",
+    }
+    missing = []
+    for mod, s in feats.items():
+        if not (s.encode("utf-8") in data or s.encode("utf-16-le") in data):
+            missing.append(mod)
+    if missing:
+        print("[build] 警告：延迟加载模块未编译进 exe，运行时这些页面会丢失！",
+              file=sys.stderr)
+        for m in missing:
+            print(f"[build]   缺失：{m}", file=sys.stderr)
+        print("[build] 请确认 build_args 含 --include-package=app",
+              file=sys.stderr)
+        return False
+    print(f"[build] 延迟模块检查：{len(feats)} 个动态加载模块已编译进 exe ✓")
+    return True
+
+
 def main():
-    if "--dry-run" in sys.argv:
+    argv = sys.argv[1:]
+
+    if "--dry-run" in argv:
         print("[build] 将要执行的命令（--dry-run）：")
         print("  " + " ".join(build_args()))
         print("[build] 编译后将自动执行：Qt 插件裁剪 → 配置文件泄漏检查 → exe 子系统检查（无终端）")
@@ -301,6 +345,10 @@ def main():
     ensure_libs_copied()
     if not check_libs_complete():
         print("[build] 警告：产物缺少 HID/ADB 原生依赖，归档将不完整！",
+              file=sys.stderr)
+
+    if not check_lazy_modules():
+        print("[build] 警告：延迟页面模块缺失，归档产物不完整！",
               file=sys.stderr)
 
     if "--no-archive" not in sys.argv:

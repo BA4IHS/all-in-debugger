@@ -23,7 +23,7 @@ from app.config import cfg, qconfig
 
 # 关于信息
 APP_NAME = "all-in-debugger"
-APP_VERSION = "v1.1"
+APP_VERSION = "v1.3"
 APP_AUTHOR = "hongshi"
 PROJECT_URL = "https://github.com/BA4IHS/all-in-debugger"
 AUTHOR_URL = "https://github.com/BA4IHS"
