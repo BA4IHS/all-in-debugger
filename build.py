@@ -13,6 +13,8 @@
 安全与体积：
     - config.json / data.json 绝不打包（含 MCP 密钥）：Nuitka 只打包
       --include-data-* 指定的文件，编译后另有防御检查兜底
+    - 用户自备的商业工具（app/libs/phoenix/）绝不打包：--include-data-dir
+      会递归整个 app/libs，故复制后显式剔除，并在归档前强制自检
     - 无终端模式：--windows-console-mode=disable（不弹控制台），
       编译后自动校验 exe 的 PE 子系统为 WINDOWS_GUI（Subsystem=2）
     - 体积优化：--lto=yes + 排除 Qt tls 插件/翻译 + 裁剪无用图片格式插件
@@ -201,9 +203,16 @@ REQUIRED_LIBS = [
     "libs/adb/AdbWinUsbApi.dll",
 ]
 
+# app/libs 下「用户自备、禁止随包分发」的子目录名。
+# PhoenixConsole 是全志商业工具，只允许运行期由用户整套拷入
+# app/libs/phoenix/ 让 find_phoenix 自动识别，不能进发布产物；
+# 而 --include-data-dir=app/libs=app/libs 是递归整目录包含，
+# Nuitka 无子目录排除语法，必须在复制后显式剔除 + 归档前自检。
+FORBIDDEN_LIB_DIRS = ("phoenix",)
+
 
 def ensure_libs_copied():
-    """把 app/libs 整目录强制复制进产物。
+    """把 app/libs 整目录强制复制进产物（跳过禁止分发的子目录）。
 
     Nuitka 的 --include-data-dir 对含子目录/二进制的 libs 目录复制不完整
     （实测只带出 README.txt，丢 hidapi.dll 和 adb 子目录），这里编译后
@@ -214,9 +223,40 @@ def ensure_libs_copied():
     if not src.is_dir():
         print(f"[build] 警告：源码目录 {src} 不存在，无法复制 libs", file=sys.stderr)
         return False
-    shutil.copytree(src, dst, dirs_exist_ok=True)
+    shutil.copytree(src, dst, dirs_exist_ok=True,
+                    ignore=shutil.ignore_patterns(*FORBIDDEN_LIB_DIRS))
     n = sum(1 for _ in dst.rglob("*"))
     print(f"[build] libs 完整性：已从源码复制 app/libs 到产物（{n} 项）")
+    return True
+
+
+def check_no_commercial_leak():
+    """防御检查：剔除并确认用户自备的商业工具未被打包分发。
+
+    Nuitka 编译阶段已按 --include-data-dir 把 app/libs/phoenix 复制进产物，
+    ensure_libs_copied 的 ignore 只能挡住它自己那份，因此这里必须再删一次，
+    删不干净（文件被占用等）就中止归档——商业软件对外分发不可挽回。
+    """
+    for name in FORBIDDEN_LIB_DIRS:
+        p = BUNDLE_DIR / "app" / "libs" / name
+        if p.is_dir():
+            n = sum(1 for _ in p.rglob("*"))
+            shutil.rmtree(p, ignore_errors=True)
+            if p.is_dir():
+                print(f"[build] 警告：{p} 删除不完整，请手工清理后重新打包",
+                      file=sys.stderr)
+            else:
+                print(f"[build] 剔除禁止分发目录：app/libs/{name}（{n} 项）")
+    leaked = [n for n in FORBIDDEN_LIB_DIRS
+              if (BUNDLE_DIR / "app" / "libs" / n).is_dir()]
+    if leaked:
+        print(f"[build] 警告：产物中仍含禁止分发的商业工具目录：{', '.join(leaked)}！",
+              file=sys.stderr)
+        print("[build] 商业软件不得随包分发，请清理 dist/main.dist/app/libs 后重试",
+              file=sys.stderr)
+        return False
+    print(f"[build] 分发检查：产物中无用户自备商业工具"
+          f"（{', '.join(FORBIDDEN_LIB_DIRS)} 未打包）✓")
     return True
 
 
@@ -323,6 +363,7 @@ def main():
         print("[build] 将要执行的命令（--dry-run）：")
         print("  " + " ".join(build_args()))
         print("[build] 编译后将自动执行：Qt 插件裁剪 → 配置文件泄漏检查 → exe 子系统检查（无终端）")
+        print("[build]                  → libs 复制（跳过禁止分发目录）→ 商业工具剔除与自检")
         print(f"[build] 归档目标：{ARCHIVE_BASE}.7z / .zip")
         return
 
@@ -335,7 +376,7 @@ def main():
     subprocess.run(build_args(), check=True)
     print(f"[build] 编译完成：{BUNDLE_DIR}")
 
-    # 编译后处理：裁剪体积 → 密钥安全 → 无终端确认 → HID/ADB 依赖完整
+    # 编译后处理：裁剪体积 → 密钥安全 → 无终端确认 → 商业工具剔除 → HID/ADB 依赖完整
     prune_qt_plugins()
     prune_qt_dlls()
     check_no_config_leak()
@@ -343,6 +384,9 @@ def main():
         print("[build] 警告：exe 存在控制台窗口风险，请检查 --windows-console-mode",
               file=sys.stderr)
     ensure_libs_copied()
+    if not check_no_commercial_leak():
+        print("[build] 错误：产物含禁止分发的商业工具，已中止归档！", file=sys.stderr)
+        sys.exit(1)
     if not check_libs_complete():
         print("[build] 警告：产物缺少 HID/ADB 原生依赖，归档将不完整！",
               file=sys.stderr)
