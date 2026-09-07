@@ -18,6 +18,7 @@ from PyQt6.QtWidgets import QApplication
 from qfluentwidgets import FluentIcon, setTheme
 
 from app.config import cfg, loadConfig, qconfig
+from app.crash_guard import installCrashGuard
 from app.ui.main_window import MainWindow
 from app.ui.splash import LoadingSplash
 from app.ui.scrollbar_style import apply_white_scrollbars, install_white_scrollbars
@@ -78,6 +79,9 @@ def _stop_splash_proc(proc):
 
 
 def main():
+    # 全局异常兜底：槽内逃逸的异常不再让进程静默退出（详见 crash_guard）
+    installCrashGuard()
+
     # 本 exe 以 --splash-proc 参数启动时，仅作为加载动画子进程运行
     # （打包版主进程派生自身 exe 实现独立转圈，见 _spawn_splash_proc）
     if "--splash-proc" in sys.argv[1:]:

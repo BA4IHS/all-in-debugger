@@ -1,5 +1,6 @@
 # coding: utf-8
 """主窗口：SplitFluentWindow + 三个页面 + 端口轮询 + 优雅停机。"""
+import logging
 from pathlib import Path
 
 from PyQt6.QtCore import QTimer, Qt, pyqtSignal
@@ -108,9 +109,15 @@ class MainWindow(SplitFluentWindow):
                                       self.sht, self.tp)
                 self._mcpService = McpService(
                     bridge, qconfig.get(cfg.mcpPort),
-                    qconfig.get(cfg.mcpToken))
-                self._mcpService.start()
+                    qconfig.get(cfg.mcpToken),
+                    allow_exec=qconfig.get(cfg.mcpAllowExec),
+                    allow_file=qconfig.get(cfg.mcpAllowFile))
+                if not self._mcpService.start():
+                    # 无密钥等情况：服务未启动，只记录原因，GUI 照常运行
+                    logging.getLogger(__name__).warning(
+                        "MCP 服务未启动：%s", self._mcpService.last_error)
             except Exception:
+                logging.getLogger(__name__).exception("MCP 服务初始化失败")
                 self._mcpService = None
 
         # 首屏：串口调试页同步构造（启动即显示、即交互）

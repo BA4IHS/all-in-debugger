@@ -4,6 +4,8 @@
 流程：连接（密码或私钥）→ invoke_shell 开交互终端（rx 轮询 + 写/resize），
 SFTP 与命令执行作为独立操作复用同一 SSH 连接；MCP 查询走 sigMcpQuery → mcpReply。
 """
+import base64
+import hashlib
 import posixpath
 import shlex
 import socket
@@ -12,6 +14,8 @@ import threading
 import time
 
 from PyQt6.QtCore import QObject, Qt, QThread, pyqtSignal, pyqtSlot
+
+from app.config import loadData, saveData
 
 # paramiko 延迟导入：顶部 import 会把 paramiko+invoke（~150ms）拖进
 # 启动链，而 SSH 连接前用不到；首次真正需要时才加载并缓存。
@@ -30,8 +34,16 @@ def _get_paramiko():
     return _paramiko or None
 
 
+def has_paramiko() -> bool:
+    """paramiko 是否可用（UI 据此判断能否发起连接）。"""
+    return _get_paramiko() is not None
+
+
 # MCP exec/list 结果中单字段截断上限，避免超大输出撑爆应答
 EXEC_TEXT_CAP = 32768
+
+# 已信任主机密钥存放在 data.json 的这个字段下（只存指纹，不存密钥本体）
+HOST_KEYS_FIELD = "ssh_host_keys"
 
 
 def paramiko_info() -> str:
@@ -41,10 +53,105 @@ def paramiko_info() -> str:
     return f"paramiko {pm.__version__}"
 
 
+# ── 主机密钥校验（TOFU）─────────────────────────────────
+# 旧实现用 AutoAddPolicy 无条件接受任意主机密钥，局域网内伪造 SSH
+# 服务器即可截获密码/私钥与全部调试命令。改为：首次连接记录指纹并提醒
+# 用户核对，之后每次连接都重新校验（不缓存信任）；指纹变更即拒绝连接，
+# 需用户在弹框中确认后才更新记录。
+
+
+class HostKeyMismatchError(Exception):
+    """服务器主机密钥与已记录指纹不一致（可能存在中间人攻击）。"""
+
+    def __init__(self, expected: str, actual: str, key_type: str):
+        super().__init__(
+            f"主机密钥指纹不一致：已记录 {expected}，服务器 {actual}")
+        self.expected = expected
+        self.actual = actual
+        self.key_type = key_type
+
+
+def host_key_id(host: str, port: int) -> str:
+    """known_hosts 风格键名：22 端口用主机名，其余用 [host]:port。"""
+    host = str(host or "").strip()
+    port = int(port or 22)
+    return host if port == 22 else f"[{host}]:{port}"
+
+
+def fingerprint_of(key) -> str:
+    """SHA256 指纹，与 `ssh-keygen -lf` 输出一致，便于线下核对。
+
+    paramiko>=3.2 提供 PKey.fingerprint；requirements 允许 >=3，
+    因此对更旧版本回退到自行计算。
+    """
+    fp = getattr(key, "fingerprint", None)
+    if isinstance(fp, str) and fp.startswith("SHA256:"):
+        return fp
+    digest = hashlib.sha256(key.asbytes()).digest()
+    return "SHA256:" + base64.b64encode(digest).decode("ascii").rstrip("=")
+
+
+def load_known_hosts() -> dict:
+    """读取已记录的主机密钥指纹表（损坏/缺失时返回空表）。"""
+    table = loadData().get(HOST_KEYS_FIELD)
+    return table if isinstance(table, dict) else {}
+
+
+def save_known_host(host_id: str, key_type: str, fingerprint: str) -> None:
+    """记录/更新某主机的指纹（只含公开信息，不含密钥与密码）。"""
+    data = loadData()
+    table = data.get(HOST_KEYS_FIELD)
+    if not isinstance(table, dict):
+        table = {}
+    table[str(host_id)] = {"key_type": str(key_type),
+                           "fingerprint": str(fingerprint),
+                           "recorded": time.strftime("%Y-%m-%d %H:%M:%S")}
+    data[HOST_KEYS_FIELD] = table
+    saveData(data)
+
+
+def make_host_key_policy(paramiko, expected: str, trust_new: bool, box: dict):
+    """构造 TOFU 主机密钥策略；校验结果写入 box 供调用方读取。
+
+    paramiko 仅在客户端 host_keys 里没有该主机时回调本策略，而这里
+    刻意不写入 client._host_keys，因此每次连接都会重新校验一次。
+    box: {host_id, key_type, fingerprint, status}，status 取
+    new（首次记录）/ matched（与记录一致）/ updated（用户确认后更新）。
+    """
+
+    class _TofuPolicy(paramiko.MissingHostKeyPolicy):
+
+        def missing_host_key(self, client, hostname, key):
+            fp = fingerprint_of(key)
+            key_type = key.get_name()
+            if expected and fp != expected:
+                if not trust_new:
+                    raise HostKeyMismatchError(expected, fp, key_type)
+                status = "updated"
+            else:
+                status = "matched" if expected else "new"
+            box.update({"host_id": hostname, "key_type": key_type,
+                        "fingerprint": fp, "status": status})
+
+    return _TofuPolicy()
+
+
+def _close_quietly(client) -> None:
+    """关闭半成品客户端：连接失败时 self._client 尚未赋值，必须就地关闭，
+    否则每次失败都会泄漏一个已完成握手的 socket。"""
+    if client is None:
+        return
+    try:
+        client.close()
+    except Exception:     # noqa: BLE001 - 关闭失败无补救手段
+        pass
+
+
 class SshWorker(QObject):
     # ── worker → UI ────────────────────────────────────────────
-    connected = pyqtSignal(dict)        # {host, port, username}
+    connected = pyqtSignal(dict)        # {host, port, username[, host_key]}
     connectFailed = pyqtSignal(str)
+    hostKeyMismatch = pyqtSignal(dict)  # 服务器指纹与已记录值不一致
     closed = pyqtSignal()
     rxData = pyqtSignal(bytes)
     errorOccurred = pyqtSignal(str)
@@ -85,10 +192,18 @@ class SshWorker(QObject):
         timeout = float(cfg.get("timeout") or 10)
         key_path = str(cfg.get("key_path") or "").strip()
         password = cfg.get("password") or None
+        # 主机密钥 TOFU：已记录指纹用于比对，trust_new_host_key 表示用户
+        # 已在弹框中确认信任变更后的新密钥
+        known = load_known_hosts().get(host_key_id(host, port)) or {}
+        expected = str(known.get("fingerprint") or "")
+        key_box = {}
+        client = None
         try:
             client = (self._client_factory() if self._client_factory
                       else paramiko.SSHClient())
-            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            client.set_missing_host_key_policy(make_host_key_policy(
+                paramiko, expected, bool(cfg.get("trust_new_host_key")),
+                key_box))
             kwargs = dict(
                 hostname=host, port=port, username=username,
                 timeout=timeout, allow_agent=False, look_for_keys=False)
@@ -110,10 +225,29 @@ class SshWorker(QObject):
             self._chan = chan
             self._connected = True
             self._info = {"host": host, "port": port, "username": username}
+            if key_box:
+                # 校验结果随 connected 给 UI 与 MCP（指纹属公开信息）
+                self._info["host_key"] = dict(key_box)
+        except HostKeyMismatchError as e:
+            _close_quietly(client)
+            self._cleanup()
+            self.hostKeyMismatch.emit(
+                {"host": host, "port": port, "key_type": e.key_type,
+                 "expected": e.expected, "actual": e.actual})
+            # 同时发 connectFailed：MCP 桥与 UI 都以此作为失败出口
+            self.connectFailed.emit(
+                f"主机密钥校验失败：服务器指纹 {e.actual} 与已记录 "
+                f"{e.expected} 不一致，可能存在中间人攻击，已拒绝连接")
+            return
         except Exception as e:    # noqa: BLE001 - 连接层统一报错出口
+            _close_quietly(client)
             self._cleanup()
             self.connectFailed.emit(f"SSH 连接失败：{e}")
             return
+        if key_box and key_box["status"] in ("new", "updated"):
+            # 首次连接 / 用户确认信任新密钥后，落盘指纹供下次比对
+            save_known_host(key_box["host_id"], key_box["key_type"],
+                            key_box["fingerprint"])
         self.connected.emit(dict(self._info))
 
     @pyqtSlot()

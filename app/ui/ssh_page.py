@@ -12,8 +12,8 @@ from PyQt6.QtWidgets import (
 
 from qfluentwidgets import (
     BodyLabel, CaptionLabel, CardWidget, ComboBox, FluentIcon, InfoBar,
-    LineEdit, PrimaryPushButton, PushButton, SingleDirectionScrollArea,
-    SpinBox, SubtitleLabel, ToolButton,
+    LineEdit, MessageBox, PrimaryPushButton, PushButton,
+    SingleDirectionScrollArea, SpinBox, SubtitleLabel, ToolButton,
 )
 
 from app import ssh_worker as sw
@@ -49,6 +49,10 @@ class SshPage(QWidget):
         self._connected = False
         self._sftpPath = "."
         self._sftpManagers = set()   # 独立 SFTP 文件管理窗口
+        # 主机密钥：用户在弹框中确认信任新密钥后的一次性放宽标记，
+        # 以及「已用弹框说明指纹变更」标记（避免再弹一次 InfoBar）
+        self._trustNewKey = False
+        self._mismatchDialog = False
 
         scroll = SingleDirectionScrollArea(self)
         left = QWidget()
@@ -145,6 +149,11 @@ class SshPage(QWidget):
         self.statusLabel.setWordWrap(True)
         v.addWidget(self.statusLabel)
 
+        # 主机密钥指纹：连接后显示，供用户与服务器端 ssh-keygen -lf 核对
+        self.hostKeyLabel = CaptionLabel("", card)
+        self.hostKeyLabel.setWordWrap(True)
+        v.addWidget(self.hostKeyLabel)
+
         self.fileManagerBtn = PushButton(
             FluentIcon.FOLDER, "文件管理", card)
         self.fileManagerBtn.setToolTip("在独立窗口中管理远端文件（SFTP）")
@@ -218,6 +227,7 @@ class SshPage(QWidget):
         w = self.sht.worker
         w.connected.connect(self._on_connected)
         w.connectFailed.connect(self._on_connect_failed)
+        w.hostKeyMismatch.connect(self._on_host_key_mismatch)
         w.closed.connect(self._on_closed)
         w.rxData.connect(self.terminal.queue_bytes)
         w.errorOccurred.connect(self._on_error)
@@ -242,7 +252,7 @@ class SshPage(QWidget):
     def _on_connect(self):
         host = self.hostEdit.text().strip()
         username = self.userEdit.text().strip()
-        if not sw.HAS_PARAMIKO:
+        if not sw.has_paramiko():
             InfoBar.error(title="缺少依赖", content=sw.paramiko_info(),
                           duration=6000, parent=self)
             return
@@ -260,7 +270,10 @@ class SshPage(QWidget):
             "timeout": 10,
             "cols": self.terminal._cols,
             "rows": self.terminal._rows,
+            # 仅当用户在「主机密钥已变更」弹框中确认时为 True
+            "trust_new_host_key": self._trustNewKey,
         }
+        self._trustNewKey = False      # 一次性，不让后续连接继续放宽校验
         self.connectBtn.setEnabled(False)
         self.statusLabel.setText("连接中…")
         self.sht.sigConnect.emit(cfg)
@@ -272,13 +285,57 @@ class SshPage(QWidget):
         self.statusLabel.setText(
             f"已连接 {info.get('username')}@{info.get('host')}:"
             f"{info.get('port')}")
+        self._show_host_key(info.get("host_key"))
         self.terminal.clear()
         self.terminal.setFocus()
         self._sftpPath = "."
 
+    def _show_host_key(self, hk):
+        """显示主机密钥指纹；首次记录/用户确认更新时提醒核对。"""
+        hk = hk or {}
+        fp = str(hk.get("fingerprint") or "")
+        if not fp:
+            self.hostKeyLabel.setText("")
+            return
+        self.hostKeyLabel.setText(
+            f"主机密钥 {hk.get('key_type') or ''} {fp}")
+        status = str(hk.get("status") or "")
+        if status == "new":
+            InfoBar.warning(
+                title="首次连接，已记录主机密钥",
+                content=f"{fp}，请与服务器管理员核对该指纹",
+                duration=8000, parent=self)
+        elif status == "updated":
+            InfoBar.warning(title="主机密钥已更新",
+                            content=f"已按你的确认记录新指纹 {fp}",
+                            duration=6000, parent=self)
+
+    def _on_host_key_mismatch(self, detail: dict):
+        """指纹与已记录值不一致：worker 已拒绝连接，由用户决定是否信任新密钥。"""
+        self._mismatchDialog = True
+        box = MessageBox(
+            "SSH 主机密钥已变更",
+            f"服务器 {detail.get('host')}:{detail.get('port')} 的主机密钥"
+            "与本机记录不一致，连接已被拒绝。\n\n"
+            f"密钥类型：{detail.get('key_type') or ''}\n"
+            f"已记录指纹：{detail.get('expected') or ''}\n"
+            f"服务器指纹：{detail.get('actual') or ''}\n\n"
+            "请先与管理员核对指纹：确认服务器近期重装或更换过密钥再选择信任，"
+            "否则可能存在中间人攻击。",
+            self.window())
+        box.yesButton.setText("信任新密钥并连接")
+        box.cancelButton.setText("取消")
+        if box.exec():
+            self._trustNewKey = True
+            self._on_connect()
+
     def _on_connect_failed(self, msg: str):
         self.connectBtn.setEnabled(True)
         self.statusLabel.setText("连接失败")
+        if self._mismatchDialog:
+            # 指纹变更已由弹框完整说明，不再重复弹一条 InfoBar
+            self._mismatchDialog = False
+            return
         InfoBar.error(title="SSH 连接失败", content=msg,
                       duration=6000, parent=self)
 
@@ -287,6 +344,7 @@ class SshPage(QWidget):
         self.connectBtn.setEnabled(True)
         self.closeBtn.setEnabled(False)
         self.statusLabel.setText("未连接")
+        self.hostKeyLabel.setText("")
         InfoBar.info(title="SSH 已断开", content="远端连接已关闭",
                      duration=3000, parent=self)
 

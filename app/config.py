@@ -2,6 +2,7 @@
 """应用配置：qconfig 持久化（主题/接收上限/日志目录）+ data.json（发送历史/预设命令）"""
 import json
 import sys
+import threading
 import uuid
 from pathlib import Path
 
@@ -22,6 +23,10 @@ else:
     APP_DIR = Path(__file__).resolve().parent.parent
 CONFIG_FILE = APP_DIR / "config.json"
 DATA_FILE = APP_DIR / "data.json"
+
+# data.json 的读改写锁：UI 线程（发送历史/预设/SSH 会话）与 worker
+# 线程（SSH 主机密钥指纹）会并发写入，不加锁会互相覆盖丢数据。
+_DATA_LOCK = threading.Lock()
 
 
 class Config(QConfig):
@@ -56,6 +61,13 @@ class Config(QConfig):
     mcpPort = RangeConfigItem(
         "MCP", "Port", default=8642, validator=RangeValidator(1024, 65535))
     mcpToken = ConfigItem("MCP", "Token", default="")
+
+    # MCP 安全策略：高危能力默认不开放，关闭时对应工具根本不注册
+    # （AI 客户端 tools/list 里看不到），同样重启后生效。
+    mcpAllowExec = OptionsConfigItem(
+        "MCP", "AllowExec", default=False, validator=BoolValidator())
+    mcpAllowFile = OptionsConfigItem(
+        "MCP", "AllowFile", default=False, validator=BoolValidator())
 
     # TCP/IP 网络调试页外观（接收区/发送区字号与颜色）
     rxFontSize = RangeConfigItem(
@@ -92,19 +104,21 @@ def saveConfig() -> None:
 # ---------------------------------------------------------------------------
 
 def loadData() -> dict:
-    try:
-        with open(DATA_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if isinstance(data, dict):
-            return data
-    except (OSError, ValueError):
-        pass
+    with _DATA_LOCK:
+        try:
+            with open(DATA_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+        except (OSError, ValueError):
+            pass
     return {"sendHistory": [], "presets": []}
 
 
 def saveData(data: dict) -> None:
-    try:
-        with open(DATA_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-    except OSError:
-        pass
+    with _DATA_LOCK:
+        try:
+            with open(DATA_FILE, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except OSError:
+            pass

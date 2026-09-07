@@ -4,7 +4,11 @@
 - 传输：Streamable HTTP（FastMCP 1.x + uvicorn），仅监听 127.0.0.1；
 - 线程：uvicorn 在独立线程跑自己的 asyncio 事件循环，不占 Qt 主循环；
 - 设备操作全部经 WorkerBridge 转发到各 worker 线程，与 GUI 共享连接；
-- 可选 Bearer Token 鉴权（纯 ASGI 中间件实现）。
+- Bearer Token 鉴权强制（纯 ASGI 中间件）：无密钥则拒绝启动，
+  仅靠 127.0.0.1 拦不住本机其它进程；
+- 高危能力可关：allow_exec / allow_file 为 False 时，命令执行与
+  文件读写类工具根本不注册（而不是注册后拒绝执行），从而在
+  tools/list 阶段就对 AI 客户端不可见。
 """
 import functools
 import threading
@@ -39,8 +43,14 @@ def _guard(fn):
     return wrapper
 
 
-def build_mcp(bridge):
-    """构建 FastMCP 实例并注册全部工具。"""
+def build_mcp(bridge, allow_exec: bool = False, allow_file: bool = False):
+    """构建 FastMCP 实例并注册全部工具。
+
+    allow_exec：是否注册命令执行类工具（ssh_exec / adb_shell / phoenix_burn）；
+    allow_file：是否注册文件读写类工具
+    （adb_push / adb_pull / adb_list_dir / ssh_file_list）。
+    两者默认 False（安全默认），对应设置页的 MCP 安全开关。
+    """
     from mcp.server.fastmcp import FastMCP
 
     # mcp SDK 1.29.x 的 FastMCP.Settings.lifespan 注解含前向引用（上游已知
@@ -195,39 +205,46 @@ def build_mcp(bridge):
         import anyio
         return await anyio.to_thread.run_sync(bridge.adb_devices)
 
-    @tool()
-    @_guard
-    async def adb_shell(serial: str, command: str, timeout: float = 15.0) -> str:
-        """在指定设备上执行 adb shell 命令并返回输出。"""
-        import anyio
-        return await anyio.to_thread.run_sync(
-            lambda: bridge.adb_shell(serial, command, timeout))
+    # adb_shell 可在设备上执行任意命令，属高危能力，默认不注册
+    if allow_exec:
 
-    @tool()
-    @_guard
-    async def adb_list_dir(serial: str, path: str = "/") -> dict:
-        """列出设备目录内容（名称/大小/时间/类型）。"""
-        import anyio
-        return await anyio.to_thread.run_sync(
-            lambda: bridge.adb_list_dir(serial, path))
+        @tool()
+        @_guard
+        async def adb_shell(serial: str, command: str,
+                            timeout: float = 15.0) -> str:
+            """在指定设备上执行 adb shell 命令并返回输出。"""
+            import anyio
+            return await anyio.to_thread.run_sync(
+                lambda: bridge.adb_shell(serial, command, timeout))
 
-    @tool()
-    @_guard
-    async def adb_push(serial: str, local: str, remote: str,
-                       timeout: float = 120.0) -> dict:
-        """把本机文件 push 到设备。"""
-        import anyio
-        return await anyio.to_thread.run_sync(
-            lambda: bridge.adb_push(serial, local, remote, timeout))
+    # 设备文件系统访问（含列目录）同样默认不注册
+    if allow_file:
 
-    @tool()
-    @_guard
-    async def adb_pull(serial: str, remote: str, local: str,
-                       timeout: float = 120.0) -> dict:
-        """把设备文件 pull 到本机。"""
-        import anyio
-        return await anyio.to_thread.run_sync(
-            lambda: bridge.adb_pull(serial, remote, local, timeout))
+        @tool()
+        @_guard
+        async def adb_list_dir(serial: str, path: str = "/") -> dict:
+            """列出设备目录内容（名称/大小/时间/类型）。"""
+            import anyio
+            return await anyio.to_thread.run_sync(
+                lambda: bridge.adb_list_dir(serial, path))
+
+        @tool()
+        @_guard
+        async def adb_push(serial: str, local: str, remote: str,
+                           timeout: float = 120.0) -> dict:
+            """把本机文件 push 到设备。"""
+            import anyio
+            return await anyio.to_thread.run_sync(
+                lambda: bridge.adb_push(serial, local, remote, timeout))
+
+        @tool()
+        @_guard
+        async def adb_pull(serial: str, remote: str, local: str,
+                           timeout: float = 120.0) -> dict:
+            """把设备文件 pull 到本机。"""
+            import anyio
+            return await anyio.to_thread.run_sync(
+                lambda: bridge.adb_pull(serial, remote, local, timeout))
 
     # ── Phoenix 烧录（全志 PhoenixConsole 命令行）──────────────
 
@@ -241,22 +258,26 @@ def build_mcp(bridge):
         import anyio
         return await anyio.to_thread.run_sync(bridge.phoenix_info)
 
-    @tool()
-    @_guard
-    async def phoenix_burn(image_path: str, count: int = 1, serial: str = "",
-                           erase: int = -1, reboot: bool = False,
-                           timeout_s: int = 600) -> dict:
-        """调用 PhoenixConsole 烧录全志固件（blocking，耗时较长）。
+    # 烧录会改写目标芯片 Flash（不可逆），归入命令执行类高危能力
+    if allow_exec:
 
-        image_path：固件包 *.img 的绝对路径；count：烧录设备数量；
-        serial：设备 adb serial（留空自动检测）；erase 取值：-1 不擦除，
-        0/1 产品模式，10/11/12 升级模式（11=擦逻辑分区，12=全擦）；
-        reboot：烧录完成后是否重启设备；timeout_s：整体超时秒数。
-        设备需先在 ADB 可见，首次烧录需在 GUI 安装 AW 驱动。"""
-        import anyio
-        return await anyio.to_thread.run_sync(
-            lambda: bridge.phoenix_burn(image_path, count, serial, erase,
-                                        reboot, float(timeout_s)))
+        @tool()
+        @_guard
+        async def phoenix_burn(image_path: str, count: int = 1,
+                               serial: str = "", erase: int = -1,
+                               reboot: bool = False,
+                               timeout_s: int = 600) -> dict:
+            """调用 PhoenixConsole 烧录全志固件（blocking，耗时较长）。
+
+            image_path：固件包 *.img 的完整路径；count：烧录设备数量；
+            serial：设备 adb serial（留空自动检测）；erase 取值：-1 不擦除，
+            0/1 产品模式，10/11/12 升级模式（11=擦逻辑分区，12=全擦）；
+            reboot：烧录完成后是否重启设备；timeout_s：整体超时秒数。
+            设备需先在 ADB 可见，首次烧录需在 GUI 安装 AW 驱动。"""
+            import anyio
+            return await anyio.to_thread.run_sync(
+                lambda: bridge.phoenix_burn(image_path, count, serial, erase,
+                                            reboot, float(timeout_s)))
 
     # ── DAP-RTT ────────────────────────────────────────────────
 
@@ -399,21 +420,25 @@ def build_mcp(bridge):
         import anyio
         return await anyio.to_thread.run_sync(bridge.ssh_disconnect)
 
-    @tool()
-    @_guard
-    async def ssh_exec(command: str, timeout: float = 15.0) -> dict:
-        """在已连接的 SSH 会话上执行命令，返回 exit/stdout/stderr。"""
-        import anyio
-        return await anyio.to_thread.run_sync(
-            lambda: bridge.ssh_exec(command, timeout))
+    if allow_exec:
 
-    @tool()
-    @_guard
-    async def ssh_file_list(path: str = ".") -> dict:
-        """列出远端目录内容（名称/大小/类型，经 SFTP）。"""
-        import anyio
-        return await anyio.to_thread.run_sync(
-            lambda: bridge.ssh_file_list(path))
+        @tool()
+        @_guard
+        async def ssh_exec(command: str, timeout: float = 15.0) -> dict:
+            """在已连接的 SSH 会话上执行命令，返回 exit/stdout/stderr。"""
+            import anyio
+            return await anyio.to_thread.run_sync(
+                lambda: bridge.ssh_exec(command, timeout))
+
+    if allow_file:
+
+        @tool()
+        @_guard
+        async def ssh_file_list(path: str = ".") -> dict:
+            """列出远端目录内容（名称/大小/类型，经 SFTP）。"""
+            import anyio
+            return await anyio.to_thread.run_sync(
+                lambda: bridge.ssh_file_list(path))
 
     # ── TCP/IP（UDP / TCP Server / TCP Client）────────────
 
@@ -494,10 +519,13 @@ class _TokenMiddleware:
 class McpService:
     """内嵌 MCP 服务的启停封装（独立线程跑 uvicorn）。"""
 
-    def __init__(self, bridge, port: int = 8642, token: str = ""):
+    def __init__(self, bridge, port: int = 8642, token: str = "",
+                 allow_exec: bool = False, allow_file: bool = False):
         self.bridge = bridge
         self.port = int(port)
         self.token = token or ""
+        self.allow_exec = bool(allow_exec)
+        self.allow_file = bool(allow_file)
         self._server = None
         self._thread = None
         self._error = None
@@ -516,12 +544,21 @@ class McpService:
         return self._error
 
     def start(self) -> str:
-        """启动服务；返回接入 URL。
+        """启动服务；返回接入 URL，未启动时返回空串（原因见 last_error）。
 
         MCP 应用构建（注册全部工具 + 生成 ASGI 应用，约 0.6s）与
         uvicorn 运行均放在后台线程，避免阻塞 GUI 启动。
         失败（依赖缺失/端口占用等）记录到 last_error，GUI 不崩溃。
+
+        无 Bearer 密钥时直接拒绝启动：旧行为是静默降级为无鉴权服务，
+        而本服务可暴露任意命令执行与文件读写能力，仅靠监听
+        127.0.0.1 拦不住本机其它进程。
         """
+        if not self.token:
+            self._error = RuntimeError(
+                "未配置 Bearer 密钥，MCP 服务未启动"
+                "（设置 → MCP 服务 中生成密钥后重启）")
+            return ""
         if self.running:
             return self.url
         self._error = None
@@ -535,9 +572,10 @@ class McpService:
         try:
             import uvicorn
 
-            app = build_mcp(self.bridge).streamable_http_app()
-            if self.token:
-                app = _TokenMiddleware(app, self.token)
+            app = build_mcp(self.bridge, self.allow_exec,
+                            self.allow_file).streamable_http_app()
+            # start() 已保证 token 非空，鉴权中间件必须挂上
+            app = _TokenMiddleware(app, self.token)
             config = uvicorn.Config(app, host="127.0.0.1", port=self.port,
                                     log_level="warning", lifespan="on",
                                     access_log=False)

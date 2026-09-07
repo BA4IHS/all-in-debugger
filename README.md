@@ -61,7 +61,7 @@
 | **USB HID** | hidapi 设备枚举、HEX/文本收发、特征报告读写、发送模板批量发送 |
 | **DAP-link RTT** | 纯 Python CMSIS-DAP/SWD 直连（不依赖厂商 DLL）、IDCODE 读取、SEGGER RTT 多通道收发 |
 | **Modbus** | RTU/TCP 主站，FC01–06/15/16；Poll 式网格数据表（每寄存器一格、逐格数据类型、双击写入）、周期轮询 |
-| **SSH** | paramiko 交互终端、密码/私钥认证、会话保存（密码不落盘）、SFTP 目录浏览/上传/下载/删除 |
+| **SSH** | paramiko 交互终端、密码/私钥认证、主机密钥指纹校验（TOFU，变更即拒连并弹框）、会话保存（密码不落盘）、SFTP 目录浏览/上传/下载/删除 |
 | **TCP/IP 网络** | UDP / TCP Server / TCP Client 三模式；TCP Server 多客户端管理（发送目标指定/全体广播/断开选中与全部）、文本/HEX 收发、时间戳、终端模式、周期发送、文件发送（整包或按包大小+间隔分包）、原始字节日志（.bin）、收发区外观自定义（字号/文字色/背景色） |
 | **内容查找** | 串口日志、各终端 `Ctrl+F` 查找，匹配计数、循环跳转、结果高亮 |
 | **Phoenix 烧录** | 全志 PhoenixConsole 命令行量产烧录（小工具页独立窗口 + MCP 工具）；工具为商业软件不随仓库分发：整套拷入 `app/libs/phoenix/` 后自动识别，或手动指定 exe |
@@ -150,7 +150,7 @@ all-in-debugger/
 ├── main.py                 # 入口
 ├── requirements.txt
 └── app/
-    ├── config.py           # qconfig 配置 + data.json（历史/预设/会话）
+    ├── config.py           # qconfig 配置 + data.json（历史/预设/会话/已信任主机指纹）
     ├── serial_utils.py     # 串口纯函数：HEX/解码/换行/端口枚举
     ├── serial_worker.py    # 串口收发线程（阻塞读循环 + MCP 查询）
     ├── native.py           # 统一 DLL 加载器（app/libs/）
@@ -160,11 +160,12 @@ all-in-debugger/
     ├── dap_rtt.py          # SEGGER RTT 控制块扫描/通道读写
     ├── dap_worker.py       # DAP/RTT 轮询线程
     ├── modbus_core.py      # pymodbus 客户端封装 + 收发线程
-    ├── ssh_worker.py       # paramiko SSH/SFTP 线程
+    ├── ssh_worker.py       # paramiko SSH/SFTP 线程（主机密钥 TOFU 校验）
     ├── tcpip_utils.py      # TCP/IP 纯函数：地址/端口校验、来源格式化
     ├── tcpip_worker.py     # TCP/IP 收发线程（selectors 多路复用 socket）
     ├── mcp_bridge.py       # MCP 桥接（跨线程信号转发）
-    ├── mcp_server.py       # 内嵌 MCP 服务（43 个工具）
+    ├── mcp_server.py       # 内嵌 MCP 服务（46 个工具，高危能力按开关门控）
+    ├── crash_guard.py      # 全局异常兜底（槽内异常转提示 + logs/crash.log，不杀进程）
     ├── libs/               # hidapi.dll + adb 三件套（随程序交付）；phoenix/ 为商业工具
     │                       # 用户自备（整套拷入即自动识别，见上方引用块）
     └── ui/
@@ -175,7 +176,7 @@ all-in-debugger/
         ├── hid_page.py / dap_page.py / modbus_page.py
         ├── ssh_page.py / ssh_file_manager.py / tcpip_page.py
         ├── console_style.py    # 日志/终端深色主题适配
-        └── setting_page.py     # 主题/容量/MCP 开关与密钥
+        └── setting_page.py     # 主题/容量/MCP 开关、安全策略与密钥
 ```
 
 ## 开发的架构
@@ -190,11 +191,25 @@ all-in-debugger/
 
 ## MCP 服务
 
-内嵌 streamable HTTP MCP 服务（FastMCP + uvicorn），向 AI 客户端暴露 **43 个调试工具**：
+内嵌 streamable HTTP MCP 服务（FastMCP + uvicorn），向 AI 客户端暴露 **46 个调试工具**：
 
 - 仅监听 `127.0.0.1`，Bearer Token 鉴权，默认关闭，设置页可开关
 - 覆盖串口 / HID / DAP-RTT / Modbus / SSH / ADB / TCP-IP 的状态查询、连接、收发、读写寄存器、文件传输
 - 首次启动自动生成密钥（绝不覆盖），设置页一键复制 AI 客户端接入配置
+
+### 安全策略
+
+| 策略 | 默认 | 说明 |
+| --- | --- | --- |
+| Bearer 密钥 | 强制 | 密钥为空时**拒绝启动服务**（不会静默降级为无鉴权），设置页自动补生成并提示重启 |
+| 允许 AI 执行命令 | 关 | 开启后才注册 `ssh_exec` / `adb_shell` / `phoenix_burn` |
+| 允许 AI 读写文件 | 关 | 开启后才注册 `adb_push` / `adb_pull` / `adb_list_dir` / `ssh_file_list` |
+
+两个开关在设置 → MCP 服务 中，修改后**重启程序生效**；关闭时对应工具根本不注册，
+在 AI 客户端的 `tools/list` 里就看不到，而不是注册后再拒绝执行。
+
+> SSH 连接同样受保护：首次连接记录服务器主机密钥 SHA256 指纹（存 `data.json`）并在界面提醒核对；
+> 之后指纹一旦变更即**拒绝连接**并弹框对比新旧指纹，需用户确认后才更新记录。
 
 ## 使用到的框架
 

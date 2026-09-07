@@ -273,14 +273,32 @@ class SettingPage(ScrollArea):
             lambda v: qconfig.set(cfg.mcpPort, int(v)))
         group.addSettingCard(self.mcpPortCard)
 
+        # 安全策略：高危能力默认关闭，关闭时对应工具根本不注册
+        self.mcpExecCard = SwitchSettingCard(
+            FluentIcon.COMMAND_PROMPT, "允许 AI 执行命令",
+            "开启后才注册 ssh_exec / adb_shell / phoenix_burn（重启后生效）",
+            configItem=cfg.mcpAllowExec, parent=group)
+        group.addSettingCard(self.mcpExecCard)
+
+        self.mcpFileCard = SwitchSettingCard(
+            FluentIcon.FOLDER, "允许 AI 读写文件",
+            "开启后才注册 adb_push / adb_pull / adb_list_dir /"
+            " ssh_file_list（重启后生效）",
+            configItem=cfg.mcpAllowFile, parent=group)
+        group.addSettingCard(self.mcpFileCard)
+
         token = qconfig.get(cfg.mcpToken) or ""
         if not token:
+            # 密钥为空时服务拒绝启动，这里自动补生成并明确告知
             token = uuid.uuid4().hex[:16]
             qconfig.set(cfg.mcpToken, token)
+            tip = "密钥缺失，已自动重新生成（需重启程序后 MCP 服务才会启动）"
+        else:
+            tip = (f"http://127.0.0.1:{qconfig.get(cfg.mcpPort)}/mcp"
+                   "（Bearer 密钥已生成）")
         self.mcpCopyCard = PushSettingCard(
             "复制接入配置", FluentIcon.SHARE, "AI 客户端接入",
-            f"http://127.0.0.1:{qconfig.get(cfg.mcpPort)}/mcp（Bearer 密钥已生成）",
-            parent=group)
+            tip, parent=group)
         self.mcpCopyCard.clicked.connect(self._copyMcpConfig)
         group.addSettingCard(self.mcpCopyCard)
         self._expand.addWidget(group)
