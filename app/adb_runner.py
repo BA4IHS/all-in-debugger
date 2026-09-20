@@ -12,6 +12,7 @@
 所有 UI 触发的 adb 调用都应走 QProcess，不能在主线程调用 subprocess.run。
 """
 import json
+import logging
 import os
 import re
 import shutil
@@ -20,6 +21,8 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 from PyQt6.QtCore import QObject, QProcess, QTimer, pyqtSignal
+
+log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # adb 定位 / 版本 / 设备列表（同步）
@@ -95,6 +98,7 @@ def list_adb_devices(adb_path: str) -> Tuple[List[dict], str]:
                            text=True, encoding="utf-8", errors="replace",
                            timeout=6, creationflags=_hide_console())
     except Exception as e:
+        log.warning("adb 设备列举失败：%s", e)
         return [], str(e)
     out = (r.stdout or "") + (r.stderr or "")
     return _parse_devices_text(out), ""
@@ -139,8 +143,13 @@ def _dispose_process_async(p: QProcess, retired=None) -> None:
     p.kill()
 
 
-def _reap_process_on_shutdown(p: QProcess, timeout_ms=1000) -> None:
-    """仅用于应用退出：确保父 QObject 销毁前子进程已经退出。"""
+def _reap_process_on_shutdown(p: QProcess, timeout_ms=300) -> None:
+    """仅用于应用退出：确保父 QObject 销毁前子进程已经退出。
+
+    timeout_ms 从 1000 收紧到 300：adb probe/shell/runner 共 4 处调用，
+    旧值最坏累计 4s 阻塞关闭；p.kill() 已发送终止信号，本地 adb
+    客户端几百 ms 内就能退出，300ms 已够。
+    """
     p.blockSignals(True)
     if p.state() != QProcess.ProcessState.NotRunning:
         p.kill()

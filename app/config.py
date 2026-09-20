@@ -48,6 +48,11 @@ class Config(QConfig):
     )
     logDir = ConfigItem("Serial", "LogDir", default="")
 
+    # 日志等级（设置页可运行时切换，即时生效）
+    logLevel = OptionsConfigItem(
+        "Log", "Level", default="INFO",
+        validator=OptionsValidator(["DEBUG", "INFO", "WARNING", "ERROR"]))
+
     # ADB
     adbPath = ConfigItem("ADB", "AdbPath", default="adb")
     defaultModel = ConfigItem("ADB", "DefaultModel", default="")
@@ -68,6 +73,11 @@ class Config(QConfig):
         "MCP", "AllowExec", default=False, validator=BoolValidator())
     mcpAllowFile = OptionsConfigItem(
         "MCP", "AllowFile", default=False, validator=BoolValidator())
+    # CH347 MCP 工具总开关：独立于 allow_exec，由设置页「启用 CH347 MCP」
+    # 控制——开启注册全部 ch347 工具（含 Flash 擦写等高危能力），
+    # 关闭则一个都不注册（重启后生效）。
+    mcpCh347 = OptionsConfigItem(
+        "MCP", "Ch347", default=False, validator=BoolValidator())
 
     # TCP/IP 网络调试页外观（接收区/发送区字号与颜色）
     rxFontSize = RangeConfigItem(

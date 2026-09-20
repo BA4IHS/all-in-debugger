@@ -12,6 +12,7 @@ PhoenixConsole 是纯命令行量产烧录工具：
 烧录经子进程完成、无原生句柄，架构同 ADB 模块：UI 走 QProcess，
 MCP 桥走同步 subprocess，不新增 worker 线程。
 """
+import logging
 import os
 import re
 import shutil
@@ -123,7 +124,10 @@ def run_burn_sync(exe: str, args, timeout_s: float) -> subprocess.CompletedProce
                   env=_run_env(exe_dir))
     if os.name == "nt":
         kwargs["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
-    return subprocess.run([exe, *args], **kwargs)
+    log.info("Phoenix 执行：%s %s", exe, " ".join(map(str, args)))
+    r = subprocess.run([exe, *args], **kwargs)
+    log.info("Phoenix 结束：returncode=%s", r.returncode)
+    return r
 
 
 def try_acquire_burn() -> bool:
@@ -188,7 +192,11 @@ class PhoenixProcess(QObject):
         QProcess.singleShot(1500, lambda p=p: self._kill_if_current(p))
 
     def shutdown(self):
-        """窗口/应用关闭专用：立即杀进程并屏蔽迟到信号。"""
+        """窗口/应用关闭专用：立即杀进程并屏蔽迟到信号。
+
+        waitForFinished 从 1000ms 收紧到 300ms：kill() 已发送终止信号，
+        旧值在多个烧录窗口/retired 进程共存时会累加阻塞关闭。
+        """
         p = self._proc
         if p is None:
             self._reap_retired()
@@ -197,7 +205,7 @@ class PhoenixProcess(QObject):
         p.blockSignals(True)
         if p.state() != QProcess.ProcessState.NotRunning:
             p.kill()
-            p.waitForFinished(1000)
+            p.waitForFinished(300)
         p.deleteLater()
         self._reap_retired()
 
@@ -247,6 +255,6 @@ class PhoenixProcess(QObject):
             p.blockSignals(True)
             if p.state() != QProcess.ProcessState.NotRunning:
                 p.kill()
-                p.waitForFinished(1000)
+                p.waitForFinished(300)
             p.deleteLater()
         self._retired.clear()

@@ -14,6 +14,7 @@ from PyQt6.QtCore import QObject, Qt, QThread, pyqtSignal, pyqtSlot
 
 # 压低 pymodbus 内部重连刷屏日志（"Failed to connect / Repeating...."）
 logging.getLogger("pymodbus").setLevel(logging.ERROR)
+log = logging.getLogger(__name__)
 
 # pymodbus 延迟导入：顶部 import（~25ms）拖进启动链，而连接前用不到；
 # 首次真正需要时才加载并缓存。
@@ -62,13 +63,26 @@ WRITE_METHODS = {
 
 
 def pymodbus_info() -> str:
-    if _get_pymodbus_client() is not None:
+    """pymodbus 版本描述（供 Modbus 页依赖标签）。
+
+    同 paramiko_info：用 importlib.metadata 读包元数据取版本，避免
+    仅为显示版本字符串就在 Modbus 页构造时 import pymodbus（拖累
+    启动）；真实可用性由 _get_pymodbus_client() 在连接时把关。
+    """
+    try:
+        from importlib.metadata import PackageNotFoundError, version
         try:
-            import pymodbus
-            return f"pymodbus {getattr(pymodbus, '__version__', '')}".strip()
-        except Exception:
-            return "pymodbus 已安装"
-    return "未安装 pymodbus（pip install pymodbus）"
+            return f"pymodbus {version('pymodbus')}"
+        except PackageNotFoundError:
+            return "未安装 pymodbus（pip install pymodbus）"
+    except Exception:  # noqa: BLE001 - 极老环境无 importlib.metadata：回退真导入
+        if _get_pymodbus_client() is not None:
+            try:
+                import pymodbus
+                return f"pymodbus {getattr(pymodbus, '__version__', '')}".strip()
+            except Exception:
+                return "pymodbus 已安装"
+        return "未安装 pymodbus（pip install pymodbus）"
 
 
 class ModbusWorker(QObject):
@@ -131,6 +145,7 @@ class ModbusWorker(QObject):
         try:
             client, ok = self._loop.run_until_complete(_do())
         except Exception as e:
+            log.warning("Modbus 连接异常 transport=%s：%s", transport, e)
             self.connectFailed.emit(f"连接异常：{e}")
             return
         if not ok:
@@ -138,6 +153,7 @@ class ModbusWorker(QObject):
                 client.close()
             except Exception:
                 pass
+            log.warning("Modbus 连接失败 transport=%s", transport)
             self.connectFailed.emit("连接失败（检查地址/串口参数）")
             return
         self._client = client
@@ -147,6 +163,7 @@ class ModbusWorker(QObject):
                           else f"{cfg.get('host', '127.0.0.1')}:"
                                f"{int(cfg.get('tcp_port', 502))}")
         ms = int((time.time() - t0) * 1000)
+        log.info("Modbus 已连接：%s %s（%d ms）", transport, self._endpoint, ms)
         self.connected.emit(f"{transport.upper()} 连接成功（{ms} ms）")
 
     @pyqtSlot()
@@ -159,6 +176,7 @@ class ModbusWorker(QObject):
         self._client = None
         if self._connected:
             self._connected = False
+            log.info("Modbus 已断开")
             self.closed.emit()
 
     @pyqtSlot(dict)
@@ -183,16 +201,26 @@ class ModbusWorker(QObject):
                     address=addr, count=count,
                     **{_SLAVE_KWARG: slave}))
         except Exception as e:
+            log.warning("Modbus 读异常 %s FC%d slave=%d addr=%d count=%d：%s",
+                        self._transport, fc, slave, addr, count, e)
             self.errorOccurred.emit(f"读取异常：{e}")
             return
         if rsp.isError():
+            log.warning("Modbus 读错误 %s FC%d slave=%d addr=%d count=%d：%s",
+                        self._transport, fc, slave, addr, count, rsp)
             self.errorOccurred.emit(f"FC{fc} 读错误：{rsp}")
             return
         values = list(rsp.bits[:count]) if fc in (1, 2) else list(rsp.registers)
+        ms = int((time.time() - t0) * 1000)
+        if log.isEnabledFor(logging.DEBUG):
+            log.debug("Modbus 读 %s FC%d slave=%d addr=%d count=%d "
+                      "(%dms) values=%s",
+                      self._transport, fc, slave, addr, count, ms,
+                      values[:32])
         result = {
             "fc": fc, "addr": addr, "slave": slave, "values": values,
             "tag": tag,
-            "ts": time.time(), "ms": int((time.time() - t0) * 1000),
+            "ts": time.time(), "ms": ms,
         }
         self._lastRead = result
         self.readResult.emit(result)
@@ -228,11 +256,18 @@ class ModbusWorker(QObject):
                     **skw)
             rsp = self._loop.run_until_complete(coro)
         except Exception as e:
+            log.warning("Modbus 写异常 %s FC%d slave=%d addr=%d：%s",
+                        self._transport, fc, slave, addr, e)
             self.errorOccurred.emit(f"写入异常：{e}")
             return
         if rsp.isError():
+            log.warning("Modbus 写错误 %s FC%d slave=%d addr=%d：%s",
+                        self._transport, fc, slave, addr, rsp)
             self.errorOccurred.emit(f"FC{fc} 写错误：{rsp}")
             return
+        if log.isEnabledFor(logging.DEBUG):
+            log.debug("Modbus 写 %s FC%d slave=%d addr=%d values=%s",
+                      self._transport, fc, slave, addr, values[:32])
         self.writeResult.emit({
             "fc": fc, "addr": addr, "count": len(values), "ts": time.time(),
         })

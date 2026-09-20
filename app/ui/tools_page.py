@@ -21,7 +21,7 @@ class ToolsPage(QWidget):
         self.setObjectName("toolsInterface")
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(24, 40, 24, 24)   # 顶部留白避开悬浮标题栏(48px)，与各页一致
+        root.setContentsMargins(20, 40, 20, 20)   # 顶部留白避开悬浮标题栏(48px)，与各页一致
         root.setSpacing(16)
 
         title = SubtitleLabel("小工具", self)

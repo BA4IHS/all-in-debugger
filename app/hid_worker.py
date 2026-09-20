@@ -4,16 +4,18 @@
 线程模型与 serial_worker 保持一致：QObject worker + moveToThread(QThread)，
 打开后进入短超时读循环；UI 线程通过 queued slot 间接操作。
 """
+import logging
 import threading
 import time
 
 from PyQt6.QtCore import QObject, Qt, QThread, pyqtSignal, pyqtSlot
 
 from app import hid_binding
-from app.native import NativeError
+from app.native import NativeError, hexPreview
 
 # MCP 只读查询用的 RX 环形缓冲上限
 RX_CAP = 65536
+log = logging.getLogger(__name__)
 
 
 class HidWorker(QObject):
@@ -42,6 +44,7 @@ class HidWorker(QObject):
     @pyqtSlot(dict)
     def requestOpen(self, cfg: dict):
         if self._dev.opened:
+            log.warning("HID 打开失败：设备已打开")
             self.openFailed.emit("HID 设备已打开")
             return
         cfg = dict(cfg or {})
@@ -59,6 +62,7 @@ class HidWorker(QObject):
             except NativeError:
                 rep_len = {}
         except (NativeError, OSError, ValueError) as e:
+            log.warning("HID 打开失败：%s", e)
             self.openFailed.emit(str(e))
             return
         self._rxBuf.clear()
@@ -71,11 +75,16 @@ class HidWorker(QObject):
             "serial": info.get("serial", "") or str(cfg.get("serial", "")),
             "report_lengths": rep_len,
         }
+        log.info("HID 已打开：vid=%s pid=%s product=%s",
+                 self._info.get("vid"), self._info.get("pid"),
+                 self._info.get("product"))
         self.deviceOpened.emit(dict(self._info))
 
     @pyqtSlot()
     def requestClose(self):
         if self._dev.opened:
+            log.info("HID 已关闭：vid=%s pid=%s",
+                     self._info.get("vid"), self._info.get("pid"))
             self._dev.close()
             self._info = {}
             self.deviceClosed.emit()
@@ -87,8 +96,11 @@ class HidWorker(QObject):
             return
         try:
             n = self._dev.write(bytes(data))
+            if log.isEnabledFor(logging.DEBUG):
+                log.debug("HID TX %d 字节：%s", len(data), hexPreview(data))
             self.dataWritten.emit(int(n))
         except NativeError as e:
+            log.warning("HID 写入失败：%s", e)
             self.errorOccurred.emit(f"HID 写入失败：{e}")
 
     @pyqtSlot(bytes)
@@ -174,6 +186,9 @@ class HidWorker(QObject):
                     self._rxBuf.extend(data)
                     if len(self._rxBuf) > RX_CAP:
                         del self._rxBuf[:len(self._rxBuf) - RX_CAP]
+                    if log.isEnabledFor(logging.DEBUG):
+                        log.debug("HID RX %d 字节：%s",
+                                  len(data), hexPreview(data))
                     self.dataReceived.emit(data, time.time())
             else:
                 time.sleep(0.02)

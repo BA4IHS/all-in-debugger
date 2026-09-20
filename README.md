@@ -1,6 +1,6 @@
 # all-in-debugger
 
-一站式硬件调试工具集：串口 / ADB / USB HID / DAP-link RTT / Modbus / SSH / TCP-IP 网络，内嵌 MCP 服务供 AI 客户端调用。
+一站式硬件调试工具集：串口 / ADB / USB HID / DAP-link RTT / Modbus / SSH / TCP-IP 网络 / CH347（SPI·I2C·GPIO·Flash·EEPROM·LCD），内嵌 MCP 服务供 AI 客户端调用。
 
 <!-- PROJECT SHIELDS -->
 
@@ -63,6 +63,7 @@
 | **Modbus** | RTU/TCP 主站，FC01–06/15/16；Poll 式网格数据表（每寄存器一格、逐格数据类型、双击写入）、周期轮询 |
 | **SSH** | paramiko 交互终端、密码/私钥认证、主机密钥指纹校验（TOFU，变更即拒连并弹框）、会话保存（密码不落盘）、SFTP 目录浏览/上传/下载/删除 |
 | **TCP/IP 网络** | UDP / TCP Server / TCP Client 三模式；TCP Server 多客户端管理（发送目标指定/全体广播/断开选中与全部）、文本/HEX 收发、时间戳、终端模式、周期发送、文件发送（整包或按包大小+间隔分包）、原始字节日志（.bin）、收发区外观自定义（字号/文字色/背景色） |
+| **CH347 调试** | WCH CH347/CH339W USB 转接芯片（基于系统驱动自带的 CH347DLL，无需额外放置文件）：SPI 流收发、I2C 收发/地址扫描/通用寄存器工具/初始化脚本、GPIO 八脚控制+引脚别名+序列宏、SPI Flash 烧写台（识别/读/先擦后写/分粒度擦除/空白检查/文件校验）、EEPROM 24Cxx、SPI 屏幕（ST7789/ILI9341 初始化序列 + RGB565 填充与图片显示） |
 | **内容查找** | 串口日志、各终端 `Ctrl+F` 查找，匹配计数、循环跳转、结果高亮 |
 | **Phoenix 烧录** | 全志 PhoenixConsole 命令行量产烧录（小工具页独立窗口 + MCP 工具）；工具为商业软件不随仓库分发：整套拷入 `app/libs/phoenix/` 后自动识别，或手动指定 exe |
 | **主题** | 浅色 / 深色 / 跟随系统，全控件主题自适应 |
@@ -161,10 +162,12 @@ all-in-debugger/
     ├── dap_worker.py       # DAP/RTT 轮询线程
     ├── modbus_core.py      # pymodbus 客户端封装 + 收发线程
     ├── ssh_worker.py       # paramiko SSH/SFTP 线程（主机密钥 TOFU 校验）
+    ├── ch347_core.py       # CH347DLL ctypes 封装 + Flash/LCD/脚本纯逻辑
+    ├── ch347_worker.py     # CH347 设备操作线程（请求-应答/进度信号）
     ├── tcpip_utils.py      # TCP/IP 纯函数：地址/端口校验、来源格式化
     ├── tcpip_worker.py     # TCP/IP 收发线程（selectors 多路复用 socket）
     ├── mcp_bridge.py       # MCP 桥接（跨线程信号转发）
-    ├── mcp_server.py       # 内嵌 MCP 服务（46 个工具，高危能力按开关门控）
+    ├── mcp_server.py       # 内嵌 MCP 服务（68 个工具，高危能力按开关门控）
     ├── crash_guard.py      # 全局异常兜底（槽内异常转提示 + logs/crash.log，不杀进程）
     ├── libs/               # hidapi.dll + adb 三件套（随程序交付）；phoenix/ 为商业工具
     │                       # 用户自备（整套拷入即自动识别，见上方引用块）
@@ -191,10 +194,10 @@ all-in-debugger/
 
 ## MCP 服务
 
-内嵌 streamable HTTP MCP 服务（FastMCP + uvicorn），向 AI 客户端暴露 **46 个调试工具**：
+内嵌 streamable HTTP MCP 服务（FastMCP + uvicorn），向 AI 客户端暴露 **68 个调试工具**：
 
 - 仅监听 `127.0.0.1`，Bearer Token 鉴权，默认关闭，设置页可开关
-- 覆盖串口 / HID / DAP-RTT / Modbus / SSH / ADB / TCP-IP 的状态查询、连接、收发、读写寄存器、文件传输
+- 覆盖串口 / HID / DAP-RTT / Modbus / SSH / ADB / TCP-IP / CH347 的状态查询、连接、收发、读写寄存器、文件传输
 - 首次启动自动生成密钥（绝不覆盖），设置页一键复制 AI 客户端接入配置
 
 ### 安全策略
@@ -202,7 +205,7 @@ all-in-debugger/
 | 策略 | 默认 | 说明 |
 | --- | --- | --- |
 | Bearer 密钥 | 强制 | 密钥为空时**拒绝启动服务**（不会静默降级为无鉴权），设置页自动补生成并提示重启 |
-| 允许 AI 执行命令 | 关 | 开启后才注册 `ssh_exec` / `adb_shell` / `phoenix_burn` |
+| 允许 AI 执行命令 | 关 | 开启后才注册 `ssh_exec` / `adb_shell` / `phoenix_burn` 及 CH347 设备改写/脚本执行类（`ch347_flash_erase` / `ch347_flash_write` / `ch347_eeprom_write` / `ch347_i2c_reg_write` / `ch347_i2c_script_run` / `ch347_gpio_macro_run` / `ch347_lcd_init_run`） |
 | 允许 AI 读写文件 | 关 | 开启后才注册 `adb_push` / `adb_pull` / `adb_list_dir` / `ssh_file_list` |
 
 两个开关在设置 → MCP 服务 中，修改后**重启程序生效**；关闭时对应工具根本不注册，

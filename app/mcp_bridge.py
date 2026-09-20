@@ -52,15 +52,16 @@ def parse_hex(text: str) -> bytes:
 
 
 class WorkerBridge:
-    """把同步调用转发到四个 worker 线程，与 GUI 共享同一连接。"""
+    """把同步调用转发到各 worker 线程，与 GUI 共享同一连接。"""
 
-    def __init__(self, st, ht, dt, mt, sht=None, tp=None):
+    def __init__(self, st, ht, dt, mt, sht=None, tp=None, cct=None):
         self.st = st   # SerialThread
         self.ht = ht   # HidThread
         self.dt = dt   # DapThread
         self.mt = mt   # ModbusThread
         self.sht = sht  # SshThread（可选）
         self.tp = tp    # TcpipThread（可选）
+        self.cct = cct  # Ch347Thread（可选）
         self._hid_cache = []
         # 命令类操作（_emit_wait）串行化锁：
         # 底层 sig* 信号不带请求 id，若两个线程并发等待同一信号，
@@ -165,6 +166,11 @@ class WorkerBridge:
                 out[name] = self._query(th, q, timeout=2.0)
             except Exception as e:  # noqa: BLE001 - 状态聚合需容错
                 out[name] = {"error": str(e)}
+        if self.cct is not None:
+            try:
+                out["ch347"] = self.ch347_status()
+            except Exception as e:  # noqa: BLE001
+                out["ch347"] = {"error": str(e)}
         return out
 
     # ── 串口 ───────────────────────────────────────────────────
@@ -647,3 +653,155 @@ class WorkerBridge:
                               f"{out.strip()[-PHOENIX_ERROR_TAIL:]}")
         return {"exit_code": int(r.returncode),
                 "output": out.strip()[-PHOENIX_OUTPUT_CAP:]}
+
+    # ── CH347（SPI/I2C/GPIO/Flash/EEPROM/LCD）────────────────
+
+    def _ch347(self, op: str, timeout: float = DEFAULT_TIMEOUT, **params):
+        """CH347 请求-应答：sigRequest → sigOpResult（id 唯一，无需持锁）。"""
+        if self.cct is None:
+            raise BridgeError("CH347 线程不可用")
+        worker = self.cct.worker
+        rid = uuid.uuid4().hex
+        req = dict(params)
+        req["op"] = op
+        req["id"] = rid
+        box = {}
+        ev = threading.Event()
+
+        def cb(msg):
+            if str(msg.get("id")) != rid or ev.is_set():
+                return
+            box.update(msg)
+            ev.set()
+
+        worker.sigOpResult.connect(cb, Qt.ConnectionType.DirectConnection)
+        try:
+            self.cct.sigRequest.emit(req)
+            if not ev.wait(timeout):
+                raise BridgeError(
+                    f"ch347_{op}：等待结果超时（{timeout:g}s，设备忙/未连接）")
+        finally:
+            try:
+                worker.sigOpResult.disconnect(cb)
+            except TypeError:
+                pass
+        if not box.get("ok"):
+            raise BridgeError(str(box.get("error") or f"ch347_{op} 失败"))
+        return box.get("data") or {}
+
+    def ch347_status(self):
+        return self._ch347("snapshot", timeout=3.0)
+
+    def ch347_scan(self):
+        return self._ch347("scan", timeout=15.0)
+
+    def ch347_open(self, index: int):
+        return self._ch347("open", index=int(index))
+
+    def ch347_close(self):
+        return self._ch347("close")
+
+    def ch347_spi_transfer(self, tx_hex: str, rx_len: int = 0,
+                           mode: int = -1, clk: int = -1):
+        """mode/clk 均 >=0 时先重新初始化 SPI，否则沿用当前接口配置。"""
+        if int(mode) >= 0 or int(clk) >= 0:
+            self._ch347("spi_init", mode=max(0, int(mode)),
+                        clk=max(0, int(clk)))
+        return self._ch347("spi_xfer", timeout=15.0,
+                           tx_hex=str(tx_hex or ""), rx_len=int(rx_len))
+
+    def ch347_i2c_transfer(self, write_hex: str, read_len: int = 0,
+                           speed: int = -1):
+        if int(speed) >= 0:
+            self._ch347("i2c_init", speed=int(speed))
+        return self._ch347("i2c_xfer", timeout=15.0,
+                           write_hex=str(write_hex or ""),
+                           read_len=int(read_len))
+
+    def ch347_i2c_scan(self):
+        return self._ch347("i2c_scan", timeout=30.0)
+
+    def ch347_i2c_reg_read(self, addr: int, reg: int = 0, reg_wide: int = 8,
+                           width: int = 8, count: int = 1):
+        return self._ch347("i2c_reg_read", timeout=20.0,
+                           addr=int(addr), reg=int(reg),
+                           reg_wide=int(reg_wide), width=int(width),
+                           count=int(count))
+
+    def ch347_i2c_reg_write(self, addr: int, reg: int, value_hex: str,
+                            reg_wide: int = 8):
+        return self._ch347("i2c_reg_write", addr=int(addr), reg=int(reg),
+                           reg_wide=int(reg_wide),
+                           value_hex=str(value_hex))
+
+    def ch347_i2c_script_run(self, steps: list, loop: int = 1):
+        n = max(1, len(list(steps or []))) * max(1, int(loop))
+        return self._ch347("i2c_script", timeout=min(300.0, 10.0 + n * 10.1),
+                           steps=list(steps or []), loop=int(loop))
+
+    def ch347_gpio_get(self):
+        return self._ch347("gpio_get")
+
+    def ch347_gpio_set(self, enable: int, dir_mask: int, data: int):
+        return self._ch347("gpio_set", enable=int(enable),
+                           dir=int(dir_mask), data=int(data))
+
+    def ch347_gpio_macro_run(self, steps: list):
+        delay = sum(int((s or {}).get("delay_ms", 0) or 0)
+                    for s in list(steps or []))
+        return self._ch347("gpio_macro", timeout=30.0 + delay / 1000.0 + \
+                           len(list(steps or [])) * 0.5,
+                           steps=list(steps or []))
+
+    def ch347_flash_identify(self):
+        return self._ch347("flash_identify")
+
+    def ch347_flash_status(self):
+        return self._ch347("flash_status")
+
+    def ch347_flash_read(self, addr: int, length: int, fast: bool = False):
+        if not 1 <= int(length) <= 4096:
+            raise BridgeError("MCP 读取长度限制 1~4096 字节")
+        return self._ch347("flash_read", timeout=60.0,
+                           addr=int(addr), len=int(length),
+                           fast=bool(fast))
+
+    def ch347_flash_blank_check(self, addr: int, length: int):
+        if not 1 <= int(length) <= 0x100000:
+            raise BridgeError("MCP 空白检查长度限制 1~1MB")
+        return self._ch347("flash_blank", timeout=120.0,
+                           addr=int(addr), len=int(length))
+
+    def ch347_flash_erase(self, addr: int, length: int,
+                          granularity: int = 4096):
+        return self._ch347("flash_erase", timeout=300.0,
+                           addr=int(addr), len=int(length),
+                           gran=int(granularity))
+
+    def ch347_flash_write(self, addr: int, data_hex: str):
+        data = parse_hex(data_hex) if str(data_hex or "").strip() else b""
+        if not 1 <= len(data) <= 65536:
+            raise BridgeError("MCP 单次写入限制 1~65536 字节")
+        return self._ch347("flash_write", timeout=300.0,
+                           addr=int(addr), data_hex=data.hex())
+
+    def ch347_eeprom_read(self, model: str, addr: int, length: int):
+        if not 1 <= int(length) <= 4096:
+            raise BridgeError("MCP 读取长度限制 1~4096 字节")
+        return self._ch347("eeprom_read", timeout=30.0,
+                           model=str(model), addr=int(addr),
+                           len=int(length))
+
+    def ch347_eeprom_write(self, model: str, addr: int, data_hex: str):
+        return self._ch347("eeprom_write", timeout=60.0, model=str(model),
+                           addr=int(addr), data_hex=str(data_hex or ""))
+
+    def ch347_lcd_init_run(self, profile: dict):
+        return self._ch347("lcd_init", timeout=120.0,
+                           profile=dict(profile or {}))
+
+    def ch347_lcd_fill(self, profile: dict, x: int, y: int, w: int, h: int,
+                       color565: int):
+        return self._ch347("lcd_fill", timeout=300.0,
+                           profile=dict(profile or {}), x=int(x), y=int(y),
+                           w=int(w), h=int(h), color565=int(color565))

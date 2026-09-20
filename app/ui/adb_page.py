@@ -6,7 +6,8 @@
 - 型号(=命令集) 与 serial(=连接目标) 分开选择
 """
 from PyQt6.QtCore import (
-    QEasingCurve, QPoint, QPropertyAnimation, QRect, Qt, QTimer, pyqtSignal,
+    QEasingCurve, QPoint, QPropertyAnimation, QRect, QSize, Qt, QTimer,
+    pyqtSignal,
 )
 from PyQt6.QtGui import QColor, QFont, QPainter
 from PyQt6.QtWidgets import QFileDialog, QHBoxLayout, QVBoxLayout, QWidget
@@ -90,7 +91,7 @@ class AdbPage(QWidget):
         rl.addWidget(self._build_option_strip())
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 40, 0, 0)
+        layout.setContentsMargins(20, 40, 20, 0)  # 左右统一留白，避免贴边
         layout.setSpacing(12)
         layout.addWidget(left)
         layout.addWidget(right, 1)
@@ -99,6 +100,13 @@ class AdbPage(QWidget):
         self._refresh_adb_label()
         self.reload_models(preselect_default=True)
         self.refresh_serials()
+
+    def minimumSizeHint(self):
+        # 终端 + 命令面板的默认 minimumSizeHint 过大，被 QStackedLayout
+        # 放大为主窗口最小尺寸：lazy 构造完成后拖动窗口会被 clamp 回
+        # 该最小尺寸（表现为"突然变大并锁定、只能调大"）。这里声明
+        # 可缩小的 hint，页内溢出交给终端/命令区滚动与压缩。
+        return QSize(640, 480)
 
     # ── 左：连接卡 ──────────────────────────────────────────────
 

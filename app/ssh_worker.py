@@ -6,6 +6,7 @@ SFTP 与命令执行作为独立操作复用同一 SSH 连接；MCP 查询走 si
 """
 import base64
 import hashlib
+import logging
 import posixpath
 import shlex
 import socket
@@ -20,6 +21,7 @@ from app.config import loadData, saveData
 # paramiko 延迟导入：顶部 import 会把 paramiko+invoke（~150ms）拖进
 # 启动链，而 SSH 连接前用不到；首次真正需要时才加载并缓存。
 _paramiko = None
+log = logging.getLogger(__name__)
 
 
 def _get_paramiko():
@@ -47,10 +49,25 @@ HOST_KEYS_FIELD = "ssh_host_keys"
 
 
 def paramiko_info() -> str:
-    pm = _get_paramiko()
-    if pm is None:
-        return "缺少 paramiko 依赖（pip install paramiko）"
-    return f"paramiko {pm.__version__}"
+    """paramiko 版本描述（供 SSH 页依赖标签）。
+
+    用 importlib.metadata 读已安装包元数据取版本，避免仅为显示一个
+    版本字符串就 import paramiko（~150ms）——该标签在 SSH 页构造时
+    就要显示，若走真导入会把 paramiko 拖进启动链，令“延迟导入”
+    形同虚设。真实的可用性判断仍由 has_paramiko()（会真正 import）
+    在连接时把关，不影响功能。
+    """
+    try:
+        from importlib.metadata import PackageNotFoundError, version
+        try:
+            return f"paramiko {version('paramiko')}"
+        except PackageNotFoundError:
+            return "缺少 paramiko 依赖（pip install paramiko）"
+    except Exception:  # noqa: BLE001 - 极老环境无 importlib.metadata：回退真导入
+        pm = _get_paramiko()
+        if pm is None:
+            return "缺少 paramiko 依赖（pip install paramiko）"
+        return f"paramiko {pm.__version__}"
 
 
 # ── 主机密钥校验（TOFU）─────────────────────────────────
@@ -231,6 +248,8 @@ class SshWorker(QObject):
         except HostKeyMismatchError as e:
             _close_quietly(client)
             self._cleanup()
+            log.warning("SSH 主机密钥校验失败 %s:%s：记录 %s 实际 %s",
+                        host, port, e.expected, e.actual)
             self.hostKeyMismatch.emit(
                 {"host": host, "port": port, "key_type": e.key_type,
                  "expected": e.expected, "actual": e.actual})
@@ -242,12 +261,15 @@ class SshWorker(QObject):
         except Exception as e:    # noqa: BLE001 - 连接层统一报错出口
             _close_quietly(client)
             self._cleanup()
+            log.warning("SSH 连接失败 %s:%s：%s", host, port, e)
             self.connectFailed.emit(f"SSH 连接失败：{e}")
             return
         if key_box and key_box["status"] in ("new", "updated"):
             # 首次连接 / 用户确认信任新密钥后，落盘指纹供下次比对
             save_known_host(key_box["host_id"], key_box["key_type"],
                             key_box["fingerprint"])
+        log.info("SSH 已连接：%s@%s:%s", self._info.get("username"),
+                 host, port)
         self.connected.emit(dict(self._info))
 
     @pyqtSlot()
@@ -255,6 +277,7 @@ class SshWorker(QObject):
         was = self._connected
         self._cleanup()
         if was:
+            log.info("SSH 已断开")
             self.closed.emit()
 
     def _cleanup(self):
@@ -280,6 +303,7 @@ class SshWorker(QObject):
         try:
             self._chan.send(bytes(data))
         except Exception as e:    # noqa: BLE001
+            log.warning("SSH 写入失败：%s", e)
             self.errorOccurred.emit(f"SSH 写入失败：{e}")
 
     @pyqtSlot(int, int)

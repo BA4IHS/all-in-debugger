@@ -5,14 +5,18 @@
 （timeout=0.05，读 in_waiting 或阻塞读 1 字节）。UI 线程通过 queued slot
 间接操作串口，严禁在 UI 线程直接触碰 serial.Serial。
 """
+import logging
 import threading
 import time
 
 import serial
 from PyQt6.QtCore import QObject, Qt, QThread, pyqtSignal, pyqtSlot
 
+from app.native import hexPreview
+
 # MCP 只读查询用的 RX 环形缓冲上限（不影响 UI 接收链路）
 RX_CAP = 65536
+log = logging.getLogger(__name__)
 
 
 class SerialWorker(QObject):
@@ -40,6 +44,7 @@ class SerialWorker(QObject):
     @pyqtSlot(dict)
     def requestOpen(self, cfg: dict):
         if self._ser is not None:
+            log.warning("串口打开失败：端口已处于打开状态")
             self.openFailed.emit("端口已处于打开状态")
             return
         cfg = dict(cfg)
@@ -57,11 +62,20 @@ class SerialWorker(QObject):
             if rts is not None:
                 ser.rts = bool(rts)
         except Exception as e:
+            log.warning("串口打开失败 %s: %s", port, e)
             self.openFailed.emit(str(e))
             return
         self._ser = ser
         self._portName = port
         self._rxBuf.clear()
+        # 详细参数：波特率/数据位/校验/停止位/流控（排查现场接线与配置）
+        log.info(
+            "串口已打开：%s baudrate=%s bytesize=%s parity=%s stopbits=%s "
+            "rtscts=%s xonxoff=%s dtr=%s rts=%s",
+            port, ser.baudrate, ser.bytesize, ser.parity, ser.stopbits,
+            ser.rtscts, ser.xonxoff,
+            ser.dtr if dtr is None else bool(dtr),
+            ser.rts if rts is None else bool(rts))
         self.portOpened.emit(port)
 
     @pyqtSlot()
@@ -77,8 +91,12 @@ class SerialWorker(QObject):
         try:
             n = ser.write(bytes(data))
             ser.flush()
+            if log.isEnabledFor(logging.DEBUG):
+                log.debug("串口 TX %s %d 字节：%s", self._portName,
+                          len(data), hexPreview(data))
             self.dataWritten.emit(int(n) if n is not None else len(data))
         except Exception as e:
+            log.warning("串口发送失败：%s", e)
             self.errorOccurred.emit(f"发送失败：{e}")
 
     @pyqtSlot(bool)
@@ -175,6 +193,7 @@ class SerialWorker(QObject):
                 n = ser.in_waiting
                 data = ser.read(n) if n else ser.read(1)
             except Exception as e:
+                log.warning("串口读取失败：%s", e)
                 self.errorOccurred.emit(f"读取失败：{e}")
                 self._closePort(notify=True)
                 continue
@@ -183,6 +202,9 @@ class SerialWorker(QObject):
                 if len(self._rxBuf) > RX_CAP:
                     del self._rxBuf[:len(self._rxBuf) - RX_CAP]
                 self._writeLog(data)
+                if log.isEnabledFor(logging.DEBUG):
+                    log.debug("串口 RX %s %d 字节：%s", self._portName,
+                              len(data), hexPreview(data))
                 self.dataReceived.emit(bytes(data), time.time())
         # 收尾：确保端口与日志关闭
         self._closePort(notify=True)
@@ -198,6 +220,8 @@ class SerialWorker(QObject):
 
     def _closePort(self, notify: bool):
         ser, self._ser = self._ser, None
+        if ser is not None:
+            log.info("串口已关闭：%s", getattr(ser, "name", "?"))
         if ser is None:
             return
         name, self._portName = self._portName, ""

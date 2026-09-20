@@ -20,6 +20,8 @@ from qfluentwidgets import (
 
 from app import adb_runner as ar
 from app.config import cfg, qconfig
+from app.logging_setup import setLogLevel
+from qfluentwidgets.common.smooth_scroll import SmoothMode
 
 # 关于信息
 APP_NAME = "all-in-debugger"
@@ -153,13 +155,16 @@ class SettingPage(ScrollArea):
         self.setWidgetResizable(True)
         self.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # 滚轮跟手：本页卡片多、重绘贵，平滑滚动会把一次滚轮放大成
+        # 几十次全页重绘（队列积压→不跟手）；改原生瞬时滚动一比一跟手
+        self.setSmoothMode(SmoothMode.NO_SMOOTH, Qt.Orientation.Vertical)
 
         self._container = QWidget(self)
         self.setWidget(self._container)
         # 官方透明化：透出窗口主题底色，修复深色模式下白字白底
         self.enableTransparentBackground()
         layout = QVBoxLayout(self._container)
-        layout.setContentsMargins(24, 40, 24, 24)  # 顶部留白避开悬浮标题栏
+        layout.setContentsMargins(20, 40, 20, 20)  # 顶部留白避开悬浮标题栏，左右与各页统一
         layout.setSpacing(16)
         self._expand = ExpandLayout()
         layout.addLayout(self._expand)
@@ -204,6 +209,16 @@ class SettingPage(ScrollArea):
             current, parent=group)
         self.logCard.clicked.connect(self._chooseLogDir)
         group.addSettingCard(self.logCard)
+
+        # 日志等级：ComboBoxSettingCard 内部已写回 qconfig，这里即时
+        # 调整 root logger level，无需重启
+        self.logLevelCard = ComboBoxSettingCard(
+            cfg.logLevel, FluentIcon.ZOOM, "日志等级",
+            "logs/app.log 与终端的输出级别（即时生效）",
+            texts=["DEBUG", "INFO", "WARNING", "ERROR"], parent=group)
+        self.logLevelCard.comboBox.currentTextChanged.connect(
+            lambda t: setLogLevel(t))
+        group.addSettingCard(self.logLevelCard)
         self._expand.addWidget(group)
 
     def _buildAdb(self):
@@ -286,6 +301,16 @@ class SettingPage(ScrollArea):
             " ssh_file_list（重启后生效）",
             configItem=cfg.mcpAllowFile, parent=group)
         group.addSettingCard(self.mcpFileCard)
+
+        # CH347 族工具由本开关单独控制（不再经 allow_exec 门控）：
+        # 开启注册全部 ch347 工具（含 Flash 擦写等高危改写），
+        # 关闭则一个都不注册
+        self.mcpCh347Card = SwitchSettingCard(
+            FluentIcon.IOT, "启用 CH347 MCP",
+            "开启后注册全部 CH347 工具（含 Flash 擦写等高危改写，"
+            "谨慎开启）（重启后生效）",
+            configItem=cfg.mcpCh347, parent=group)
+        group.addSettingCard(self.mcpCh347Card)
 
         token = qconfig.get(cfg.mcpToken) or ""
         if not token:

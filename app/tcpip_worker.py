@@ -11,6 +11,7 @@ UI 线程通过 queued slot 间接操作，严禁在 UI 线程直接触碰 socke
 - tcp_client：连接远程主机（单连接）
 - udp：绑定本地端口，向远程目标发送（支持广播 255.255.255.255）
 """
+import logging
 import selectors
 import socket
 import threading
@@ -19,9 +20,11 @@ import time
 from PyQt6.QtCore import QObject, QThread, Qt, pyqtSignal, pyqtSlot
 
 from app.tcpip_utils import format_source, validate_host, validate_port
+from app.native import hexPreview
 
 _RECV_CHUNK = 65536
 _SEND_TIMEOUT = 5.0          # 非阻塞 socket 发送的保护性超时（秒）
+log = logging.getLogger(__name__)
 
 
 class TcpipWorker(QObject):
@@ -58,6 +61,7 @@ class TcpipWorker(QObject):
     @pyqtSlot(dict)
     def requestStart(self, cfg: dict):
         if self._running:
+            log.warning("网络启动失败：已处于连接状态")
             self.startFailed.emit("网络已处于连接状态")
             return
         cfg = cfg or {}
@@ -74,6 +78,7 @@ class TcpipWorker(QObject):
                 remote_host = validate_host(str(cfg.get("remote_host") or ""))
                 remote_port = validate_port(cfg.get("remote_port") or 0)
         except ValueError as e:
+            log.warning("网络参数校验失败：%s", e)
             self.startFailed.emit(str(e))
             return
 
@@ -113,10 +118,13 @@ class TcpipWorker(QObject):
                 raise ValueError(f"未知模式：{mode}")
         except Exception as e:          # noqa: BLE001
             self._stop_all()
+            log.warning("网络启动失败 mode=%s：%s", mode, e)
             self.startFailed.emit(str(e))
             return
         self._mode = mode
         self._running = True
+        log.info("网络已启动：mode=%s local=%s remote=%s", mode,
+                 self._local_str, self._remote_str)
         self.started.emit({"mode": mode, "local": self._local_str,
                            "remote": self._remote_str})
 
@@ -127,6 +135,7 @@ class TcpipWorker(QObject):
         self._stop_all()
         self._running = False
         self._mode = ""
+        log.info("网络已停止")
         self.stopped.emit()
 
     @pyqtSlot(dict)
@@ -156,8 +165,13 @@ class TcpipWorker(QObject):
                 self._sendall(self._tcp_sock, data)
             else:                        # udp
                 self._udp_sock.sendto(data, self._remote)
+            if log.isEnabledFor(logging.DEBUG):
+                log.debug("网络 TX mode=%s target=%s %d 字节：%s",
+                          self._mode, target or self._remote_str,
+                          len(data), hexPreview(data))
             self.dataWritten.emit(len(data))
         except Exception as e:          # noqa: BLE001
+            log.warning("网络发送失败 mode=%s：%s", self._mode, e)
             self.errorOccurred.emit(f"发送失败：{e}")
 
     @pyqtSlot(str)
@@ -292,6 +306,9 @@ class TcpipWorker(QObject):
                 self._logFp.flush()
             except OSError:
                 pass
+        if log.isEnabledFor(logging.DEBUG):
+            log.debug("网络 RX src=%s %d 字节：%s",
+                      src, len(data), hexPreview(data))
         self.dataReceived.emit(bytes(data), time.time(), src)
 
     def _sendall(self, sock, data: bytes):

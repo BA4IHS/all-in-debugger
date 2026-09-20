@@ -53,7 +53,7 @@ class ConsolePage(QWidget):
         splitter.setChildrenCollapsible(False)
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 40, 0, 0)  # 顶部留白避开悬浮标题栏(48px)
+        layout.setContentsMargins(20, 40, 20, 0)  # 顶部留白避开悬浮标题栏(48px)，左右统一留白
         layout.setSpacing(12)
         layout.addWidget(scroll)
         layout.addWidget(splitter, 1)

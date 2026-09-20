@@ -9,17 +9,24 @@
 - 高危能力可关：allow_exec / allow_file 为 False 时，命令执行与
   文件读写类工具根本不注册（而不是注册后拒绝执行），从而在
   tools/list 阶段就对 AI 客户端不可见。
+- CH347 族工具由 allow_ch347（设置页「启用 CH347 MCP」）单独门控：
+  开启注册全部 ch347 工具（含 Flash 擦写等高危改写），关闭则一个
+  都不注册，不再经 allow_exec。
 """
 import functools
+import logging
 import threading
 import warnings
 
 from app.mcp_bridge import BridgeError, parse_hex, to_hex
 
+log = logging.getLogger(__name__)
+
 INSTRUCTIONS = (
     "all-in-debugger 的调试能力集合：串口、USB HID、ADB、DAP-Link RTT、Modbus、SSH、"
-    "TCP/IP 网络（UDP/TCP Server/TCP Client）、Phoenix 固件烧录。"
-    "典型流程：先 *_status / *_enumerate 查询，再 open/connect/start，"
+    "TCP/IP 网络（UDP/TCP Server/TCP Client）、CH347（SPI/I2C/GPIO/SPI Flash/"
+    "EEPROM/LCD）、Phoenix 固件烧录。"
+    "典型流程：先 *_status / *_enumerate / ch347_scan 查询，再 open/connect，"
     "然后 send/write/read。HEX 数据用空格分隔的十六进制字节表示。"
 )
 
@@ -43,13 +50,18 @@ def _guard(fn):
     return wrapper
 
 
-def build_mcp(bridge, allow_exec: bool = False, allow_file: bool = False):
+def build_mcp(bridge, allow_exec: bool = False, allow_file: bool = False,
+              allow_ch347: bool = False):
     """构建 FastMCP 实例并注册全部工具。
 
-    allow_exec：是否注册命令执行类工具（ssh_exec / adb_shell / phoenix_burn）；
+    allow_exec：是否注册命令执行类工具（ssh_exec / adb_shell /
+                phoenix_burn）；
     allow_file：是否注册文件读写类工具
-    （adb_push / adb_pull / adb_list_dir / ssh_file_list）。
-    两者默认 False（安全默认），对应设置页的 MCP 安全开关。
+                （adb_push / adb_pull / adb_list_dir / ssh_file_list）；
+    allow_ch347：是否注册 CH347 族工具——由设置页「启用 CH347 MCP」
+                开关单独控制，不再经 allow_exec 门控；开启注册全部
+                ch347 工具（含 Flash 擦写等高危改写），关闭则一个都不注册。
+    三者默认 False（安全默认），对应设置页的 MCP 开关。
     """
     from mcp.server.fastmcp import FastMCP
 
@@ -493,7 +505,214 @@ def build_mcp(bridge, allow_exec: bool = False, allow_file: bool = False):
         return await anyio.to_thread.run_sync(
             lambda: bridge.tcpip_close_client(addr))
 
+    # ── CH347（SPI/I2C/GPIO/Flash/EEPROM/LCD）───────────────
+    # 是否注册由设置页「启用 CH347 MCP」开关（allow_ch347）单独控制，
+    # 不再经 allow_exec 门控：开启注册全部 ch347 工具（含 Flash 擦写
+    # 等高危改写），关闭则一个都不注册。
+    if allow_ch347:
+        _register_ch347(mcp, bridge, tool)
+
     return mcp
+
+
+def _register_ch347(mcp, bridge, tool):
+    """注册 CH347 族工具（仅 allow_ch347 开启时被调用）。
+
+    安全策略：CH347 的高危能力（Flash 擦写、EEPROM 写、寄存器写、
+    脚本/宏执行）不再经 allow_exec 门控，而是与只读工具一起由本
+    函数唯一开关——设置页「启用 CH347 MCP」——控制：关闭时 AI
+    客户端看不到任何 ch347 工具；开启即全部能力放行（用户已显式
+    授权接触 CH347 硬件）。
+    """
+
+    @tool()
+    @_guard
+    async def ch347_scan() -> dict:
+        """扫描 CH347 设备（索引 0~15），返回设备列表与 DLL 状态。"""
+        import anyio
+        return await anyio.to_thread.run_sync(bridge.ch347_scan)
+
+    @tool()
+    @_guard
+    async def ch347_open(index: int) -> dict:
+        """按索引打开 CH347（与 GUI 共享同一设备，独占访问）。"""
+        import anyio
+        return await anyio.to_thread.run_sync(
+            lambda: bridge.ch347_open(index))
+
+    @tool()
+    @_guard
+    async def ch347_close() -> dict:
+        """关闭当前打开的 CH347 设备。"""
+        import anyio
+        return await anyio.to_thread.run_sync(bridge.ch347_close)
+
+    @tool()
+    @_guard
+    async def ch347_spi_transfer(tx_hex: str, rx_len: int = 0,
+                                 mode: int = -1, clk: int = -1) -> dict:
+        """SPI 全双工流传输。mode/clk 均 >=0 时先重新初始化（clk 档 0~7：
+        60M/30M/15M/7.5M/3.75M/1.875M/937.5K/468.75K），否则沿用当前配置。"""
+        import anyio
+        return await anyio.to_thread.run_sync(
+            lambda: bridge.ch347_spi_transfer(tx_hex, rx_len, mode, clk))
+
+    @tool()
+    @_guard
+    async def ch347_i2c_transfer(write_hex: str, read_len: int = 0,
+                                 speed: int = -1) -> dict:
+        """I2C 原始流：write 首字节 = 8bit 器件地址；speed>=0 时先初始化。"""
+        import anyio
+        return await anyio.to_thread.run_sync(
+            lambda: bridge.ch347_i2c_transfer(write_hex, read_len, speed))
+
+    @tool()
+    @_guard
+    async def ch347_i2c_scan() -> dict:
+        """扫描 I2C 总线（0x03~0x77），返回 ACK 的 7bit 地址列表。"""
+        import anyio
+        return await anyio.to_thread.run_sync(bridge.ch347_i2c_scan)
+
+    @tool()
+    @_guard
+    async def ch347_i2c_reg_read(addr: int, reg: int = 0, reg_wide: int = 8,
+                                 width: int = 8, count: int = 1) -> dict:
+        """通用寄存器读：addr=7bit 器件地址，reg_wide/width=8|16，count 个。"""
+        import anyio
+        return await anyio.to_thread.run_sync(
+            lambda: bridge.ch347_i2c_reg_read(addr, reg, reg_wide, width,
+                                              count))
+
+    @tool()
+    @_guard
+    async def ch347_gpio_get() -> dict:
+        """读 GPIO：dir/data 位掩码（bit0~7 = GPIO0~7，dir 1=输出）。"""
+        import anyio
+        return await anyio.to_thread.run_sync(bridge.ch347_gpio_get)
+
+    @tool()
+    @_guard
+    async def ch347_gpio_set(enable: int, dir_mask: int, data: int) -> dict:
+        """设 GPIO 位掩码：enable=启用，dir_mask 1=输出，data 1=高电平。"""
+        import anyio
+        return await anyio.to_thread.run_sync(
+            lambda: bridge.ch347_gpio_set(enable, dir_mask, data))
+
+    @tool()
+    @_guard
+    async def ch347_flash_identify() -> dict:
+        """读 SPI Flash JEDEC ID，返回厂商/型号/容量（未收录按容量字节回退）。"""
+        import anyio
+        return await anyio.to_thread.run_sync(bridge.ch347_flash_identify)
+
+    @tool()
+    @_guard
+    async def ch347_flash_status() -> dict:
+        """读 Flash 状态寄存器（sr/busy/wel）。"""
+        import anyio
+        return await anyio.to_thread.run_sync(bridge.ch347_flash_status)
+
+    @tool()
+    @_guard
+    async def ch347_flash_read(addr: int, length: int = 256,
+                               fast: bool = False) -> dict:
+        """读 SPI Flash（≤4096B），返回连续 hex 字符串。"""
+        import anyio
+        return await anyio.to_thread.run_sync(
+            lambda: bridge.ch347_flash_read(addr, length, fast))
+
+    @tool()
+    @_guard
+    async def ch347_flash_blank_check(addr: int, length: int = 4096) -> dict:
+        """空白检查（全 0xFF？）；返回 blank 与首个非空地址。"""
+        import anyio
+        return await anyio.to_thread.run_sync(
+            lambda: bridge.ch347_flash_blank_check(addr, length))
+
+    @tool()
+    @_guard
+    async def ch347_eeprom_read(model: str, addr: int = 0,
+                                length: int = 16) -> dict:
+        """读 I2C EEPROM；model 如 24C02/24C64/24C256。"""
+        import anyio
+        return await anyio.to_thread.run_sync(
+            lambda: bridge.ch347_eeprom_read(model, addr, length))
+
+    @tool()
+    @_guard
+    async def ch347_lcd_fill(profile: dict, x: int, y: int, w: int, h: int,
+                             color565: int) -> dict:
+        """LCD 矩形纯色填充（RGB565）。profile 结构见 ch347_lcd_init_run。"""
+        import anyio
+        return await anyio.to_thread.run_sync(
+            lambda: bridge.ch347_lcd_fill(profile, x, y, w, h, color565))
+
+    # 设备级改写/任意序列执行属高危：与只读工具同受「启用 CH347 MCP」
+    # 开关控制（开启即全部注册），不再单独经 allow_exec。
+
+    @tool()
+    @_guard
+    async def ch347_flash_erase(addr: int, length: int = 4096,
+                                granularity: int = 4096) -> dict:
+        """擦除 SPI Flash；granularity 4096/32768/65536，0=全片（不可逆）。"""
+        import anyio
+        return await anyio.to_thread.run_sync(
+            lambda: bridge.ch347_flash_erase(addr, length, granularity))
+
+    @tool()
+    @_guard
+    async def ch347_flash_write(addr: int, data_hex: str) -> dict:
+        """写 SPI Flash（先擦后写，首尾扇区整块擦！≤64KB）。"""
+        import anyio
+        return await anyio.to_thread.run_sync(
+            lambda: bridge.ch347_flash_write(addr, data_hex))
+
+    @tool()
+    @_guard
+    async def ch347_eeprom_write(model: str, addr: int,
+                                 data_hex: str) -> dict:
+        """写 I2C EEPROM（覆盖原有内容）。"""
+        import anyio
+        return await anyio.to_thread.run_sync(
+            lambda: bridge.ch347_eeprom_write(model, addr, data_hex))
+
+    @tool()
+    @_guard
+    async def ch347_i2c_reg_write(addr: int, reg: int, value_hex: str,
+                                  reg_wide: int = 8) -> dict:
+        """通用寄存器写（对任意外设，有硬件副作用）。"""
+        import anyio
+        return await anyio.to_thread.run_sync(
+            lambda: bridge.ch347_i2c_reg_write(addr, reg, value_hex,
+                                               reg_wide))
+
+    @tool()
+    @_guard
+    async def ch347_i2c_script_run(steps: list, loop: int = 1) -> dict:
+        """执行 I2C 初始化脚本；步 {addr7, write_hex, read_len, delay_ms}，
+        write 首字节=8bit 器件地址。"""
+        import anyio
+        return await anyio.to_thread.run_sync(
+            lambda: bridge.ch347_i2c_script_run(steps, loop))
+
+    @tool()
+    @_guard
+    async def ch347_gpio_macro_run(steps: list) -> dict:
+        """执行 GPIO 序列宏；步 {pin, level, delay_ms<=5000}。"""
+        import anyio
+        return await anyio.to_thread.run_sync(
+            lambda: bridge.ch347_gpio_macro_run(steps))
+
+    @tool()
+    @_guard
+    async def ch347_lcd_init_run(profile: dict) -> dict:
+        """发送 LCD 初始化序列。profile：{controller, width, height,
+        rgb_order, mirror_x/y, dc_pin, res_pin, blk_pin, spi_mode,
+        spi_clk, steps:[{kind:cmd|data|delay, hex, ms}]}；要求设备已
+        打开且 SPI/GPIO 空闲。"""
+        import anyio
+        return await anyio.to_thread.run_sync(
+            lambda: bridge.ch347_lcd_init_run(profile))
 
 
 class _TokenMiddleware:
@@ -520,12 +739,14 @@ class McpService:
     """内嵌 MCP 服务的启停封装（独立线程跑 uvicorn）。"""
 
     def __init__(self, bridge, port: int = 8642, token: str = "",
-                 allow_exec: bool = False, allow_file: bool = False):
+                 allow_exec: bool = False, allow_file: bool = False,
+                 allow_ch347: bool = False):
         self.bridge = bridge
         self.port = int(port)
         self.token = token or ""
         self.allow_exec = bool(allow_exec)
         self.allow_file = bool(allow_file)
+        self.allow_ch347 = bool(allow_ch347)
         self._server = None
         self._thread = None
         self._error = None
@@ -558,6 +779,7 @@ class McpService:
             self._error = RuntimeError(
                 "未配置 Bearer 密钥，MCP 服务未启动"
                 "（设置 → MCP 服务 中生成密钥后重启）")
+            log.warning("MCP 服务拒绝启动：%s", self._error)
             return ""
         if self.running:
             return self.url
@@ -565,6 +787,9 @@ class McpService:
         self._thread = threading.Thread(
             target=self._serve, name="mcp-http", daemon=True)
         self._thread.start()
+        log.info("MCP 服务启动中：%s（allow_exec=%s allow_file=%s "
+                 "allow_ch347=%s）", self.url, self.allow_exec,
+                 self.allow_file, self.allow_ch347)
         return self.url
 
     def _serve(self):
@@ -573,7 +798,8 @@ class McpService:
             import uvicorn
 
             app = build_mcp(self.bridge, self.allow_exec,
-                            self.allow_file).streamable_http_app()
+                            self.allow_file,
+                            self.allow_ch347).streamable_http_app()
             # start() 已保证 token 非空，鉴权中间件必须挂上
             app = _TokenMiddleware(app, self.token)
             config = uvicorn.Config(app, host="127.0.0.1", port=self.port,
@@ -585,10 +811,19 @@ class McpService:
             self._error = e
             self._server = None
 
-    def stop(self, timeout: float = 3.0):
+    def stop(self, timeout: float = 1.5):
+        """停服务：置 uvicorn.should_exit 后 join 后台线程。
+
+        timeout 默认 1.5s（旧值 3s 会阻塞主窗关闭）：should_exit 后
+        uvicorn 通常几百 ms 内退出，超时后 daemon 线程也会随进程退出被强杀。
+        """
         if self._server is not None:
             self._server.should_exit = True
         if self._thread is not None:
             self._thread.join(timeout)
+            if self._thread.is_alive():
+                log.warning(
+                    "MCP 后台线程未在 %.1fs 内退出（daemon，不阻塞进程退出）",
+                    timeout)
         self._server = None
         self._thread = None

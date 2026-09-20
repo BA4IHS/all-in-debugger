@@ -4,6 +4,7 @@
 流程：打开调试器 → SWD 连接 → （可选复位）→ 定位/解析 RTT 控制块 →
 周期轮询 UP 通道上行数据；下行通过 queued slot 写入 DOWN 通道。
 """
+import logging
 import threading
 import time
 
@@ -11,9 +12,11 @@ from PyQt6.QtCore import QObject, Qt, QThread, pyqtSignal, pyqtSlot
 
 from app import dap_core, dap_rtt
 from app.dap_core import DapError
+from app.native import hexPreview
 
 # MCP 只读查询用的每通道 RX 环形缓冲上限
 RX_CAP = 65536
+log = logging.getLogger(__name__)
 
 # RTT 轮询失败自动恢复（目标复位/瞬态故障）：
 # - 每 _POLL_RECOVER_EVERY 次连续失败尝试一次 read_idcode 重新初始化
@@ -55,6 +58,7 @@ class DapWorker(QObject):
     def requestOpen(self, cfg: dict):
         """cfg: {path, clock, ram_start, ram_size, cb_addr, reset, kernel}"""
         if self._probe.opened:
+            log.warning("DAP 打开失败：调试器已打开")
             self.openFailed.emit("调试器已打开")
             return
         cfg = dict(cfg or {})
@@ -79,8 +83,10 @@ class DapWorker(QObject):
             self._target = target
         except DapError as e:
             self._cleanup_probe()
+            log.warning("DAP 连接失败：%s", e)
             self.openFailed.emit(str(e))
             return
+        log.info("DAP 已连接：IDCODE=%#010x", idcode)
         self.probeOpened.emit(f"IDCODE={idcode:#010x}")
         # RTT 控制块：指定地址优先，否则按芯片包/内核预设解析区间
         try:
@@ -163,8 +169,11 @@ class DapWorker(QObject):
         try:
             n = dap_rtt.write_channel(self._target, ch, bytes(data))
         except DapError as e:
+            log.warning("RTT 写入失败 ch=%s：%s", idx, e)
             self.errorOccurred.emit(f"RTT 写入失败：{e}")
             return
+        if log.isEnabledFor(logging.DEBUG):
+            log.debug("RTT TX ch=%s %d 字节：%s", idx, n, hexPreview(data))
         self.dataWritten.emit(str(idx), n)
 
     @pyqtSlot()
@@ -431,6 +440,9 @@ class DapWorker(QObject):
                     buf.extend(data)
                     if len(buf) > RX_CAP:
                         del buf[:len(buf) - RX_CAP]
+                    if log.isEnabledFor(logging.DEBUG):
+                        log.debug("RTT RX ch=%s %d 字节：%s",
+                                  key, len(data), hexPreview(data))
                     self.dataReceived.emit(key, data, time.time())
         except DapError as e:
             self._pollFails += 1

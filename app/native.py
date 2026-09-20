@@ -1,17 +1,20 @@
 # coding: utf-8
-"""原生 DLL 加载器（HID / ADB USB / CMSIS-DAP 共用的本地库接入层）。
+"""原生 DLL 加载器（HID / ADB USB / CMSIS-DAP / CH347 共用的本地库接入层）。
 
 约定：
 - DLL 统一放在 程序目录/app/libs/ 下（支持 x86/x64 子目录自动选择）
-- 也允许通过环境变量覆盖：HIDAPI_DLL / ADBWINAPI_DLL / CMSIS_DAP_DLL
+- 也允许通过环境变量覆盖：HIDAPI_DLL / ADBWINAPI_DLL / CMSIS_DAP_DLL / CH347DLL
 - 所有加载失败均优雅降级：返回 None，由调用方给出"未找到 DLL"提示
 """
 import ctypes
+import logging
 import os
 import platform
 import sys
 from pathlib import Path
 from typing import Optional
+
+log = logging.getLogger(__name__)
 
 if getattr(sys, "frozen", False):
     _BASE = Path(sys.executable).resolve().parent
@@ -30,6 +33,7 @@ def _candidate_dirs():
     arch = "x64" if platform.architecture()[0] == "64bit" else "x86"
     dirs.append(LIBS_DIR / arch)
     dirs.append(LIBS_DIR / "adb")   # adb 三件套子目录
+    dirs.append(LIBS_DIR / "ch347")  # CH347DLL.dll 子目录
     dirs.append(_BASE)  # 兼容放在程序根目录
     return dirs
 
@@ -56,18 +60,36 @@ def load_dll(name: str, env_var: str = "") -> Optional[ctypes.WinDLL]:
         env = os.environ.get(env_var, "").strip()
         if env and Path(env).is_file():
             path = Path(env)
+            log.info("原生库 %s：使用环境变量 %s 覆盖路径 %s",
+                     name, env_var, path)
     if path is None:
         path = _find_file(name)
     if path is None:
         _load_errors[key] = f"未找到 {name}（请放入 {LIBS_DIR}）"
+        log.warning("原生库加载失败：%s", _load_errors[key])
         return None
     try:
         dll = ctypes.WinDLL(str(path))
     except OSError as e:
         _load_errors[key] = f"加载 {name} 失败：{e}"
+        log.warning("原生库加载失败：%s", _load_errors[key])
         return None
     _loaded[key] = dll
+    log.info("原生库已加载：%s <- %s", name, path)
     return dll
+
+
+def hexPreview(data: bytes, limit: int = 64) -> str:
+    """DEBUG 级详细数据日志用的十六进制预览（截断到 limit 字节）。
+
+    各 worker 的收/发数据日志共用；limit 控制单条日志长度，
+    超长数据只截前段并标注总长，避免大流量刷屏。
+    """
+    b = bytes(data or b"")
+    head = b[:limit].hex(" ")
+    if len(b) > limit:
+        return f"{head} …（共 {len(b)} 字节）"
+    return f"{head}（{len(b)} 字节）"
 
 
 def load_error(name: str) -> str:

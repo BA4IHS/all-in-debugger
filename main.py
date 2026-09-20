@@ -5,8 +5,10 @@ Copyright (C) 2026 BA4IHS
 本程序为自由软件，可按 GNU GPLv3 条款再分发和/或修改（详见 LICENSE）。
 """
 import os
+import platform
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -19,6 +21,7 @@ from qfluentwidgets import FluentIcon, setTheme
 
 from app.config import cfg, loadConfig, qconfig
 from app.crash_guard import installCrashGuard
+from app.logging_setup import setupLogging, setLogLevel
 from app.ui.main_window import MainWindow
 from app.ui.splash import LoadingSplash
 from app.ui.scrollbar_style import apply_white_scrollbars, install_white_scrollbars
@@ -79,8 +82,22 @@ def _stop_splash_proc(proc):
 
 
 def main():
+    t0 = time.monotonic()
     # 全局异常兜底：槽内逃逸的异常不再让进程静默退出（详见 crash_guard）
     installCrashGuard()
+    # 应用日志落盘到 logs/app.log（源码运行时并挂 stderr）；
+    # 未装 handler 前所有 logging.getLogger().xxx() 都是静默的
+    setupLogging()
+
+    import logging
+    log = logging.getLogger("app.main")
+    # 启动环境：系统/架构/解释器/打包形态/入口，排查现场问题的基础信息
+    log.info(
+        "all-in-debugger 启动：os=%s(%s) arch=%s python=%s frozen=%s "
+        "exe=%s cwd=%s argv=%s",
+        platform.system(), platform.release(), platform.machine(),
+        sys.version.split()[0], _FROZEN, sys.executable,
+        os.getcwd(), sys.argv[1:])
 
     # 本 exe 以 --splash-proc 参数启动时，仅作为加载动画子进程运行
     # （打包版主进程派生自身 exe 实现独立转圈，见 _spawn_splash_proc）
@@ -92,14 +109,25 @@ def main():
     QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
     app = QApplication(sys.argv)
+    tQt = time.monotonic()
     loadConfig()
+    # 日志等级跟随配置：setupLogging 先以默认 INFO 挂 handler，
+    # 配置加载后再按 cfg.logLevel 调整 root level
+    setLogLevel(qconfig.get(cfg.logLevel))
     setTheme(qconfig.get(cfg.themeMode))
     install_white_scrollbars(app)
+    tCfg = time.monotonic()
 
     splashProc = _spawn_splash_proc()
 
     window = MainWindow()
     apply_white_scrollbars(window)
+    tWin = time.monotonic()
+    log.info(
+        "启动阶段耗时：QApplication=%.0fms 配置/主题=%.0fms 主窗口构造=%.0fms "
+        "splash=%s",
+        (tQt - t0) * 1000, (tCfg - tQt) * 1000, (tWin - tCfg) * 1000,
+        "独立进程" if splashProc is not None else "内嵌遮罩")
 
     if splashProc is not None:
         # 源码运行：独立动画进程在屏幕中央转圈（不受主进程阻塞影响），
@@ -110,6 +138,7 @@ def main():
             window.resize(1220, 780)
             window.show()
             center_window(window)
+            window.logStartupInfo(t0)
             _stop_splash_proc(splashProc)
 
         window.lazyFinished.connect(reveal)
@@ -117,13 +146,15 @@ def main():
     else:
         # 打包版：主窗口内嵌遮罩盖住分批构造过程，就绪后自动撤除
         splash = LoadingSplash(FluentIcon.DEVELOPER_TOOLS, window)
-        splash.setStatus("正在加载模块 (0/9)…")
+        splash.setStatus(
+            f"正在加载模块 (0/{len(MainWindow._LAZY_BATCHES) + 1})…")
         window.lazyProgress.connect(
             lambda done, total, name: splash.setStatus(
                 f"正在加载{name} ({done}/{total})…"))
         window.lazyFinished.connect(splash.finish)
         window.show()
         splash.show()
+        window.logStartupInfo(t0)
     sys.exit(app.exec())
 
 
