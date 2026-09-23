@@ -73,12 +73,18 @@ _load_err = ""
 
 
 def _load():
-    """加载 winusb.dll 并声明 API 原型（带缓存）。"""
+    """加载 winusb.dll 并声明 API 原型（带缓存）。
+
+    winusb.dll 是 Windows 系统组件（System32），通常不在随包目录里。
+    查 native 时用 quiet=True：本函数自带系统回退，随包目录没有属正常
+    情况，不该留下“未找到 winusb.dll”的误导性告警。
+    """
     global _dll, _load_err
     if _dll is not None:
         return _dll
-    # winusb.dll 是 Windows 系统组件：优先程序 libs 目录，回退系统搜索路径
-    dll = native.load_dll("winusb.dll")
+    # 1) 随包副本优先（允许用户放定制版覆盖）；缺失属正常，不告警
+    dll = native.load_dll("winusb.dll", quiet=True)
+    # 2) 系统搜索路径（Windows 自带组件）
     if dll is None:
         try:
             dll = ctypes.WinDLL("winusb.dll")

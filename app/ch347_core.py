@@ -567,13 +567,20 @@ def load_ch347_dll():
 
     优先顺序：环境变量 CH347DLL 指定路径 → app/libs/ch347/ 副本 →
     系统目录（安装官方驱动后 CH347DLLA64.DLL 已在 System32）。
+
+    先探随包目录再回退系统目录：官方驱动装在 System32 时，若把
+    “未找到 CH347DLL.dll”当成失败告警，日志会留下一条误导信息
+    （功能其实正常）。故查 native 时用 quiet=True。
     """
     global _dll_logged
-    dll = load_dll(DLL_NAME, DLL_ENV)
+    # 1) 随包/环境变量优先（native 的统一解析，含缓存）；缺失不告警。
+    #    只查 DLL_NAME：CH347DLLA64.dll 是官方驱动的系统文件名，
+    #    不会出现在随包目录，拿它查 native 只会白记一条“未探测到”。
+    dll = load_dll(DLL_NAME, DLL_ENV, quiet=True)
     if dll is not None:
-        # load_dll 内部已记录来源路径，这里不重复
         _dll_logged = True
         return dll
+    # 2) 系统目录（官方驱动安装位置，不随本软件分发）
     for name in _SYSTEM_DLL_NAMES:
         try:
             dll = ctypes.WinDLL(name)

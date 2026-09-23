@@ -222,7 +222,13 @@ def build_open_config(port: str, baudrate: str, databits: str, stopbits: str,
         "parity": PARITY_MAP[parity],
         "xonxoff": xonxoff,
         "rtscts": rtscts,
-        "dsrdtr": dtr,
+        # dsrdtr 是「DSR/DTR 硬件流控」开关，不是 DTR 信号电平！
+        # 切勿写成 dsrdtr=dtr：pyserial 在 dsrdtr=True 时会启用
+        # DTR_CONTROL_HANDSHAKE + fOutxDsrFlow，对端 DSR 不满足就把写入
+        # 阻塞到超时（write_timeout 有值时报 "Write timeout"，无值时永久
+        # 卡死 worker 线程）。DTR/RTS 电平通过下面的 dtr/rts 属性设置。
+        # 本工具的流控选项只含 None/XON-XOFF/RTS-CTS，故恒为 False。
+        "dsrdtr": False,
         "timeout": 0.05,
         "write_timeout": 1,
         "dtr": dtr,

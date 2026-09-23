@@ -197,11 +197,12 @@ class WorkerBridge(QObject):
         # write_timeout 必须显式设置：pyserial 默认 write_timeout=None 是
         # 无限阻塞，硬件流控/对端不接收时 ser.write() 会永久卡住 worker
         # 线程，表现为串口整体卡死（不再收数据、不再响应任何操作）。
-        # 与 UI 侧 build_open_config 保持一致。
+        # dsrdtr 显式关闭：它是 DSR/DTR 硬件流控开关（开启后对端 DSR
+        # 不满足即阻塞写入），本工具的流控只经 xonxoff/rtscts 控制。
         cfg = {"port": str(port), "baudrate": int(baudrate),
                "bytesize": int(bytesize), "parity": str(parity)[:1].upper(),
                "stopbits": float(stopbits), "timeout": 0.05,
-               "write_timeout": 1}
+               "write_timeout": 1, "dsrdtr": False}
         args = self._emit_wait(
             [self.st.worker.portOpened], [self.st.worker.openFailed],
             lambda: self.st.sigOpen.emit(cfg), DEFAULT_TIMEOUT, "打开串口")

@@ -118,6 +118,15 @@ def main():
     install_white_scrollbars(app)
     tCfg = time.monotonic()
 
+    # 原生库只在启动这一刻查找一次：探测结果（含“未找到”）在此定死，
+    # 之后运行期全是缓存命中，不会在页面轮询/MCP 调用时冒出
+    # “未找到 xxx.dll” 警告（看似运行期故障，实为惰性加载的副作用）。
+    from app.native import preload as _preloadNative
+    _nativeErrors = _preloadNative()
+    if _nativeErrors:
+        log.info("原生库探测结果：%s",
+                 "；".join(_nativeErrors.values()))
+
     splashProc = _spawn_splash_proc()
 
     window = MainWindow()

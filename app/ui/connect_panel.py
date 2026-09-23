@@ -103,7 +103,9 @@ class ConnectPanel(QWidget):
 
         sigRow = QHBoxLayout()
         self.dtrCheck = CheckBox("DTR", card)
-        self.dtrCheck.setChecked(True)
+        # 默认不勾选：DTR 拉高会让部分开发板进入复位/保持状态（如 Arduino
+        # 类自动复位电路），默认关闭更安全；需要时用户手动勾选。
+        self.dtrCheck.setChecked(False)
         self.rtsCheck = CheckBox("RTS", card)
         self.dtrCheck.stateChanged.connect(
             lambda s: self.dtrChanged.emit(self.dtrCheck.isChecked()))

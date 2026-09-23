@@ -87,9 +87,10 @@ class SerialWorker(QObject):
         try:
             log.info(
                 "串口已打开：%s baudrate=%s bytesize=%s parity=%s stopbits=%s "
-                "rtscts=%s xonxoff=%s dtr=%s rts=%s",
+                "rtscts=%s xonxoff=%s dsrdtr=%s dtr=%s rts=%s",
                 port, ser.baudrate, ser.bytesize, ser.parity, ser.stopbits,
                 ser.rtscts, ser.xonxoff,
+                getattr(ser, "dsrdtr", None),
                 ser.dtr if dtr is None else bool(dtr),
                 ser.rts if rts is None else bool(rts))
         except Exception as e:
