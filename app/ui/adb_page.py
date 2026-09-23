@@ -91,7 +91,7 @@ class AdbPage(QWidget):
         rl.addWidget(self._build_option_strip())
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(20, 40, 20, 0)  # 左右统一留白，避免贴边
+        layout.setContentsMargins(20, 40, 20, 12)  # 与各页一致，避免窗口边缘贴边
         layout.setSpacing(12)
         layout.addWidget(left)
         layout.addWidget(right, 1)
@@ -193,8 +193,8 @@ class AdbPage(QWidget):
     def _build_command_card(self) -> QWidget:
         sec = QWidget(self)
         v = QVBoxLayout(sec)
-        # 左边距与上方"ADB 连接"卡对齐，让"命令集"文字离窗口左边框更远
-        v.setContentsMargins(16, 0, 0, 0)
+        # 左右边距与上方"ADB 连接"卡内部控件对齐，避免列表贴边
+        v.setContentsMargins(16, 0, 16, 0)
         v.setSpacing(8)
 
         # 标题行：大号标题 + 搜索/保存/清屏 工具按钮
@@ -237,6 +237,18 @@ class AdbPage(QWidget):
         self.modelSubtitle = CaptionLabel("-", sec)
         v.addWidget(self.modelSubtitle)
 
+        mode_row = QHBoxLayout()
+        mode_row.addWidget(BodyLabel("命令点击", sec))
+        self.commandModeSwitch = SwitchButton(sec)
+        self.commandModeSwitch.setOnText("点击即执行")
+        self.commandModeSwitch.setOffText("填入终端")
+        self.commandModeSwitch.setChecked(True)
+        self.commandModeSwitch.setToolTip(
+            "开启：点击命令立即执行；关闭：仅填入已打开的 ADB Shell，等待发送")
+        mode_row.addWidget(self.commandModeSwitch)
+        mode_row.addStretch(1)
+        v.addLayout(mode_row)
+
         run_all = PrimaryPushButton(FluentIcon.PLAY, "全部采集", sec)
         run_all.clicked.connect(lambda _=False: self._run_all())
         v.addWidget(run_all)
@@ -245,7 +257,7 @@ class AdbPage(QWidget):
         self._cmdScroll = ScrollArea(sec)
         self._cmdContainer = QWidget(self._cmdScroll)
         self._cmdLayout = QVBoxLayout(self._cmdContainer)
-        self._cmdLayout.setContentsMargins(0, 0, 0, 0)
+        self._cmdLayout.setContentsMargins(0, 0, 0, 14)
         self._cmdLayout.setSpacing(6)
         self._cmdLayout.addStretch(1)
         self._cmdScroll.setWidget(self._cmdContainer)
@@ -563,6 +575,9 @@ class AdbPage(QWidget):
                           duration=4000, parent=self)
 
     def _run_one(self, name: str, cmd: str):
+        if not self.commandModeSwitch.isChecked():
+            self._prefill_shell_command(cmd)
+            return
         path = self._resolve_adb()
         serial = self._current_serial()
         if not path or not serial:
@@ -573,6 +588,11 @@ class AdbPage(QWidget):
         self.runner.run_one(path, serial, name, cmd)
 
     def _run_all(self):
+        if not self.commandModeSwitch.isChecked():
+            InfoBar.info(title="当前为填入模式",
+                         content="请逐条点击命令，填入终端后确认发送",
+                         duration=4000, parent=self)
+            return
         if not self._active_profile:
             InfoBar.warning(title="提示", content="无可用命令集",
                             duration=3000, parent=self)
@@ -585,6 +605,16 @@ class AdbPage(QWidget):
                                 duration=3000, parent=self)
             return
         self.runner.run_all(path, serial, self._active_profile["commands"])
+
+    def _prefill_shell_command(self, cmd: str):
+        if not self.shell.is_running():
+            InfoBar.warning(title="ADB Shell 未打开",
+                            content="请先打开 ADB Shell，再填入命令",
+                            duration=4000, parent=self)
+            return
+        codec = self.codecCombo.currentText() or "UTF-8"
+        self.shell.write(cmd.encode(codec, errors="replace"))
+        self.terminal.setFocus()
 
     def _save_report(self):
         import time

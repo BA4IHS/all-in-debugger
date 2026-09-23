@@ -103,17 +103,6 @@ class HidWorker(QObject):
             log.warning("HID 写入失败：%s", e)
             self.errorOccurred.emit(f"HID 写入失败：{e}")
 
-    @pyqtSlot(bytes)
-    def requestFeatureSend(self, data: bytes):
-        if not self._dev.opened:
-            self.errorOccurred.emit("HID 设备未打开")
-            return
-        try:
-            n = self._dev.send_feature_report(bytes(data))
-            self.dataWritten.emit(int(n))
-        except NativeError as e:
-            self.errorOccurred.emit(f"发送特征报告失败：{e}")
-
     @pyqtSlot(int, int)
     def requestFeatureGet(self, report_id: int, size: int):
         if not self._dev.opened:
@@ -171,7 +160,7 @@ class HidWorker(QObject):
             if self._dev.opened:
                 if self._readBroken:
                     # 设备不支持/拒绝中断读（如被独占的键鼠接收器）：
-                    # 保持打开，写与特征报告仍可用
+                    # 保持打开，普通写入与特征报告读取仍可用
                     time.sleep(0.05)
                     continue
                 try:
@@ -180,7 +169,7 @@ class HidWorker(QObject):
                     self._readBroken = True
                     self.errorOccurred.emit(
                         f"HID 读取不可用（{e}），设备保持打开，"
-                        "写入/特征报告仍可尝试")
+                        "普通写入/特征报告读取仍可尝试")
                     continue
                 if data:
                     self._rxBuf.extend(data)
@@ -222,7 +211,6 @@ class HidThread(QObject):
     sigOpen = pyqtSignal(dict)          # {path} 或 {vid,pid,serial}
     sigClose = pyqtSignal()
     sigWrite = pyqtSignal(bytes)
-    sigFeatureSend = pyqtSignal(bytes)
     sigFeatureGet = pyqtSignal(int, int)  # report_id, size
     sigMcpQuery = pyqtSignal(dict)      # MCP 只读查询请求
 
@@ -236,7 +224,6 @@ class HidThread(QObject):
         self.sigOpen.connect(self.worker.requestOpen, queued)
         self.sigClose.connect(self.worker.requestClose, queued)
         self.sigWrite.connect(self.worker.requestWrite, queued)
-        self.sigFeatureSend.connect(self.worker.requestFeatureSend, queued)
         self.sigFeatureGet.connect(self.worker.requestFeatureGet, queued)
         self.sigMcpQuery.connect(self.worker.requestMcpQuery, queued)
 

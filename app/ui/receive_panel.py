@@ -55,7 +55,7 @@ class ReceiveController:
         if self._pending and self._pending[-1][0] == source:
             self._pending[-1][1] += data
         else:
-            self._pending.append((source, bytearray(data)))
+            self._pending.append([source, bytearray(data)])
 
     def setHexDisplay(self, on: bool):
         self._hexDisplay = bool(on)

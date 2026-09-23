@@ -11,7 +11,7 @@ from qfluentwidgets import (
 from app import serial_utils as su
 from app.config import loadData, saveData
 
-HISTORY_MAX = 50
+HISTORY_MAX = 10
 
 
 def _labeled_switch(sw, text: str) -> None:
@@ -118,7 +118,6 @@ class SendPanel(QWidget):
             return
         self.sendRequested.emit(data)
         self._addHistory(self.input.text())
-        self.input.clear()
 
     def _onPeriodToggled(self, on: bool):
         if on:
@@ -139,12 +138,16 @@ class SendPanel(QWidget):
     def _addHistory(self, text: str):
         if not text.strip():
             return
-        idx = self.historyCombo.findText(text)
-        if idx >= 0:
-            self.historyCombo.removeItem(idx)
-        self.historyCombo.insertItem(0, text)
-        while self.historyCombo.count() > HISTORY_MAX:
-            self.historyCombo.removeItem(self.historyCombo.count() - 1)
+        self.historyCombo.blockSignals(True)
+        try:
+            idx = self.historyCombo.findText(text)
+            if idx >= 0:
+                self.historyCombo.removeItem(idx)
+            self.historyCombo.insertItem(0, text)
+            while self.historyCombo.count() > HISTORY_MAX:
+                self.historyCombo.removeItem(self.historyCombo.count() - 1)
+        finally:
+            self.historyCombo.blockSignals(False)
         self._saveHistory()
 
     def _loadHistory(self):

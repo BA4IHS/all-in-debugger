@@ -219,6 +219,12 @@ class SettingPage(ScrollArea):
         self.logLevelCard.comboBox.currentTextChanged.connect(
             lambda t: setLogLevel(t))
         group.addSettingCard(self.logLevelCard)
+
+        self.logFormatCard = ComboBoxSettingCard(
+            cfg.logFormat, FluentIcon.DOCUMENT, "串口数据文件格式",
+            "选择记录文件扩展名：BIN 或 LOG", texts=["BIN", "LOG"],
+            parent=group)
+        group.addSettingCard(self.logFormatCard)
         self._expand.addWidget(group)
 
     def _buildAdb(self):

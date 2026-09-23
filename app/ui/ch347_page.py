@@ -8,7 +8,6 @@
 - GPIO：8 引脚方向/电平/别名 + 序列宏（复位时序等一键操作）
 - Flash：JEDEC 识别、读/写(先擦后写)/分粒度擦除/BlankCheck/文件读写校验
 - EEPROM：24Cxx 读写
-- LCD：ST7789/ILI9341 初始化序列、RGB565 纯色填充与图片显示
 
 所有设备操作经 Ch347Thread 请求-应答（op/id 令牌防串扰），自定义脚本
 与别名持久化到 data.json 的 ch347 字段。
@@ -16,7 +15,7 @@
 import json
 
 from PyQt6.QtCore import Qt, QSize, QTimer
-from PyQt6.QtGui import QColor
+from PyQt6.QtGui import QColor, QFont
 from PyQt6.QtWidgets import (
     QColorDialog, QFileDialog, QHBoxLayout, QTableWidgetItem, QStackedWidget,
     QVBoxLayout, QWidget,
@@ -26,7 +25,7 @@ from qfluentwidgets import (
     BodyLabel, CaptionLabel, CardWidget, CheckBox, ComboBox, FluentIcon,
     InfoBar, LineEdit, MessageBox, PlainTextEdit, Pivot, PrimaryPushButton,
     ProgressBar, PushButton, SingleDirectionScrollArea, SpinBox,
-    SubtitleLabel, TableWidget, ToolButton,
+    SubtitleLabel, SwitchButton, TableWidget, ToolButton,
 )
 
 from app import ch347_core as cc
@@ -40,6 +39,11 @@ MAX_HEX_VIEW = 4096        # 输出视图最多显示的字节数
 
 class Ch347Page(QWidget):
     """CH347 多功能调试页；thread 为唯一设备持有者。"""
+
+    def sizeHint(self):
+        # 子页内容（尤其 GPIO 八列卡片）可能给出较大的自然宽度；
+        # 页面内容已有滚动容器，不能让自然宽度反向撑大主窗口。
+        return QSize(640, 480)
 
     def minimumSizeHint(self):
         # 各子页表格/编辑框的 setMinimumHeight 累加使默认
@@ -80,19 +84,15 @@ class Ch347Page(QWidget):
         bl.addWidget(self.stack, 1)
         root.addWidget(body, 1)
 
-        # 标签懒构建：CH347 页有 7 个子标签，一次性全建实测约 2.7s
-        # （数百次 setStyleSheet + 7 次 enableTransparentBackground），
-        # 是启动最慢的一页。这里只为每个标签放一个空占位容器并预约
-        # builder，首次点到该标签时才真正构建内容——启动只需建首个
-        # SPI 标签，其余 6 个的构造成本摊到用户实际点开时。
+        # 标签懒构建：这里只为每个标签放一个空占位容器并预约 builder，
+        # 首次点到该标签时才真正构建内容，降低 CH347 页的初始构造成本。
         for key, title, builder in (
                 ("spi", "SPI", self._build_spi_tab),
                 ("i2c", "I2C", self._build_i2c_tab),
                 ("i2cdev", "I2C 器件", self._build_i2c_dev_tab),
                 ("gpio", "GPIO", self._build_gpio_tab),
                 ("flash", "Flash", self._build_flash_tab),
-                ("eeprom", "EEPROM", self._build_eeprom_tab),
-                ("lcd", "LCD 屏幕", self._build_lcd_tab)):
+            ("eeprom", "EEPROM", self._build_eeprom_tab)):
             host = QWidget()
             hl = QVBoxLayout(host)
             hl.setContentsMargins(0, 0, 0, 0)
@@ -848,36 +848,77 @@ class Ch347Page(QWidget):
         card = CardWidget()
         cv = QVBoxLayout(card)
         cv.setContentsMargins(16, 12, 16, 12)
-        cv.setSpacing(6)
-        cv.addWidget(SubtitleLabel("GPIO 0~7", card))
+        cv.setSpacing(8)
+        header = QHBoxLayout()
+        header.addWidget(SubtitleLabel("状态 · GPIO0-7", card))
+        header.addStretch(1)
+        header.addWidget(CaptionLabel("大号 1/0 = 当前电平 · 灰色 = 已关闭", card))
+        cv.addLayout(header)
+
         self.gpioRows = []
         names = self._store.get("gpio_names") or {}
+        pinRow = QHBoxLayout()
+        pinRow.setSpacing(4)
         for pin in range(8):
-            r = QHBoxLayout()
-            r.addWidget(BodyLabel(f"{pin}", card))
-            alias = LineEdit(card)
+            pinCard = CardWidget(card)
+            pv = QVBoxLayout(pinCard)
+            pv.setContentsMargins(4, 8, 4, 8)
+            pv.setSpacing(6)
+
+            title = BodyLabel(str(pin), pinCard)
+            title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            pv.addWidget(title)
+            alias = LineEdit(pinCard)
             alias.setPlaceholderText(f"GPIO{pin}")
             alias.setText(str(names.get(str(pin), "")))
-            alias.setFixedWidth(150)
-            alias.editingFinished.connect(lambda p=pin: self._gpio_name_saved(p))
-            en = CheckBox("启用", card)
-            dr = CheckBox("输出", card)
-            lv = PushButton("低", card)
-            lv.setFixedWidth(56)
+            alias.setFixedWidth(48)
+            alias.setToolTip("引脚别名")
+            alias.editingFinished.connect(
+                lambda p=pin: self._gpio_name_saved(p))
+            # 空别名不占用卡片空间；已有别名仍通过卡片提示保留可见性。
+            if alias.text().strip():
+                title.setToolTip(alias.text().strip())
+            alias.hide()
+
+            en = CheckBox("使能", pinCard)
+            en.setChecked(True)
+            en.setToolTip("启用该 GPIO 引脚")
+            pv.addWidget(en, 0, Qt.AlignmentFlag.AlignHCenter)
+
+            lv = PushButton("0", pinCard)
+            lv.setMinimumHeight(96)
+            lv.setFont(QFont("Segoe UI", 24, QFont.Weight.Bold))
+            lv.setStyleSheet(
+                "QPushButton { background: transparent; border: none; "
+                "color: #f5f5f5; }"
+                "QPushButton:disabled { color: #8a8a8a; }")
+            lv.setToolTip("OUT 模式下点击切换输出电平")
             lv.setProperty("level", 0)
-            lv.setToolTip("点击切换并立即输出")
-            lv.clicked.connect(lambda _=False, p=pin: self._gpio_toggle(p))
-            r.addWidget(alias)
-            r.addWidget(en)
-            r.addWidget(dr)
-            r.addWidget(lv)
-            r.addStretch(1)
-            cv.addLayout(r)
+            self._gpio_set_level_display(lv, 0)
+            lv.clicked.connect(
+                lambda _=False, p=pin: self._gpio_toggle(p))
+            pv.addWidget(lv, 1)
+
+            dr = SwitchButton(pinCard)
+            dr.setOnText("OUT")
+            dr.setOffText("IN")
+            dr.setFixedWidth(72)
+            dr.setToolTip("切换输入/输出模式")
+            pv.addWidget(dr, 0, Qt.AlignmentFlag.AlignHCenter)
+            pv.setStretch(2, 1)
+            pinRow.addWidget(pinCard, 1)
             self.gpioRows.append((en, dr, lv, alias))
+            en.stateChanged.connect(
+                lambda _state, p=pin: self._gpio_pin_changed(p))
+            dr.checkedChanged.connect(
+                lambda _checked, p=pin: self._gpio_pin_changed(p))
+            self._gpio_update_level_enabled(pin)
+        cv.addLayout(pinRow)
+
         brow = QHBoxLayout()
-        bSet = PrimaryPushButton("应用输出", card)
+        bSet = PrimaryPushButton("应用 GPIO", card)
         bSet.clicked.connect(lambda: self._gpio_apply())
-        bGet = PushButton("读取输入", card)
+        bGet = PushButton("读取状态", card)
         bGet.clicked.connect(self._gpio_read)
         self.gpioAuto = CheckBox("500ms 自动刷新", card)
         brow.addWidget(bSet)
@@ -950,14 +991,29 @@ class Ch347Page(QWidget):
                 data |= 1 << i
         return en, dr, data
 
+    def _gpio_update_level_enabled(self, pin):
+        en, dr, lv, _a = self.gpioRows[pin]
+        lv.setEnabled(en.isChecked() and dr.isChecked())
+
+    @staticmethod
+    def _gpio_set_level_display(button, level):
+        level = int(bool(level))
+        button.setText(f"{level}\n{'HIGH' if level else 'LOW'}")
+
+    def _gpio_pin_changed(self, pin):
+        self._gpio_update_level_enabled(pin)
+        if self._opened:
+            self._gpio_apply(silent=True)
+
     def _gpio_toggle(self, pin):
         if not self._need_ready("电平切换"):
             return
         _e, d, lv, _a = self.gpioRows[pin]
+        if not d.isChecked():
+            return
         new = 0 if lv.property("level") else 1
         lv.setProperty("level", new)
-        lv.setText("高" if new else "低")
-        d.setChecked(True)              # 切换隐含输出方向
+        self._gpio_set_level_display(lv, new)
         en, dr, data = self._gpio_masks()
         self._req("gpio_set", params={"enable": en, "dir": dr, "data": data})
 
@@ -989,10 +1045,13 @@ class Ch347Page(QWidget):
             dr = int(data.get("dir", 0))
             val = int(data.get("data", 0))
             for i, (_e, d, lv, _a) in enumerate(self.gpioRows):
+                d.blockSignals(True)
                 d.setChecked(bool(dr >> i & 1))
+                d.blockSignals(False)
                 bit = (val >> i) & 1
                 lv.setProperty("level", bit)
-                lv.setText("高" if bit else "低")
+                self._gpio_set_level_display(lv, bit)
+                self._gpio_update_level_enabled(i)
             self._log(self.gpioOut, f"dir={dr:02X} data={val:02X}")
         self._gpio_poll_busy = True
         self._req("gpio_get", cb=done)

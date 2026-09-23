@@ -6,7 +6,7 @@
 import time
 from pathlib import Path
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QObject, QThread, Qt, pyqtSignal, pyqtSlot
 from PyQt6.QtWidgets import QHBoxLayout, QSplitter, QWidget
 
 from qfluentwidgets import CardWidget, InfoBar, SingleDirectionScrollArea
@@ -19,6 +19,14 @@ from app.ui.receive_panel import ReceivePanel
 from app.ui.send_panel import SendPanel
 
 
+class _PortScanWorker(QObject):
+    result = pyqtSignal(list)
+
+    @pyqtSlot()
+    def scan(self):
+        self.result.emit(su.list_serial_ports())
+
+
 class ConsolePage(QWidget):
 
     def __init__(self, st: SerialThread, parent=None):
@@ -29,6 +37,8 @@ class ConsolePage(QWidget):
         self.connectPanel = ConnectPanel()
         self.receivePanel = ReceivePanel()
         self.sendPanel = SendPanel()
+        self._portScanThread = None
+        self._portScanWorker = None
         # 左侧连接面板较窄，提示条统一显示在宽阔的接收区右上角。
         self.connectPanel.setInfoBarParent(self.receivePanel)
 
@@ -53,13 +63,13 @@ class ConsolePage(QWidget):
         splitter.setChildrenCollapsible(False)
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(20, 40, 20, 0)  # 顶部留白避开悬浮标题栏(48px)，左右统一留白
+        layout.setContentsMargins(20, 40, 20, 12)  # 顶部留白避开悬浮标题栏(48px)，四周统一留白
         layout.setSpacing(12)
         layout.addWidget(scroll)
         layout.addWidget(splitter, 1)
 
-        self.connectPanel.refreshPorts()
         self._connectSignals()
+        self.refreshPorts()
 
     # ── 信号接线 ────────────────────────────────────────────────
 
@@ -80,6 +90,7 @@ class ConsolePage(QWidget):
         rp.countsChanged.connect(cp.setCounts)
 
         # 连接面板 → worker / 接收区
+        cp.refreshRequested.connect(self.refreshPorts)
         cp.openRequested.connect(st.sigOpen.emit)
         cp.closeRequested.connect(st.sigClose.emit)
         cp.dtrChanged.connect(st.sigSetDTR.emit)
@@ -129,7 +140,10 @@ class ConsolePage(QWidget):
                               duration=5000, parent=self.receivePanel)
                 return
             ts = time.strftime("%Y%m%d_%H%M%S")
-            path = str(Path(logDir) / f"serial_{port}_{ts}.bin")
+            logFormat = str(qconfig.get(cfg.logFormat) or "BIN").upper()
+            if logFormat not in ("BIN", "LOG"):
+                logFormat = "BIN"
+            path = str(Path(logDir) / f"serial_{port}_{ts}.{logFormat.lower()}")
             self.st.sigSetLogFile.emit(path)
             self._logActive = True
             InfoBar.success(title="开始记录", content=path,
@@ -141,7 +155,25 @@ class ConsolePage(QWidget):
     # ── 对外 ────────────────────────────────────────────────────
 
     def refreshPorts(self):
-        self.connectPanel.refreshPorts(su.list_serial_ports())
+        if self._portScanThread is not None and self._portScanThread.isRunning():
+            return
+        thread = QThread(self)
+        worker = _PortScanWorker()
+        worker.moveToThread(thread)
+        thread.started.connect(worker.scan)
+        worker.result.connect(self.connectPanel.refreshPorts)
+        worker.result.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._onPortScanFinished)
+        self._portScanThread = thread
+        self._portScanWorker = worker
+        thread.start()
+
+    @pyqtSlot()
+    def _onPortScanFinished(self):
+        self._portScanThread = None
+        self._portScanWorker = None
 
     def shutdown(self):
         """关窗前调用：停周期发送与日志。"""

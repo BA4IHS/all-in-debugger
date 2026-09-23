@@ -228,7 +228,7 @@ class TcpipPage(QWidget):
         splitter.setChildrenCollapsible(False)
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(20, 40, 20, 0)  # 左右统一留白，避免贴边
+        layout.setContentsMargins(20, 40, 20, 12)  # 与各页一致，避免窗口边缘贴边
         layout.setSpacing(12)
         layout.addWidget(scroll)
         layout.addWidget(splitter, 1)

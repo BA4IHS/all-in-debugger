@@ -4,7 +4,7 @@
 功能：
 - 设备枚举（VID/PID 过滤）/ 打开 / 关闭
 - 中断报告收发：HEX/ASCII 显示、时间戳开关、关键字高亮
-- 特征报告：获取 + 发送（写）
+- 特征报告：获取（读取）
 - 多命令模板：命名报文 + 延时/重复次数，批量发送与循环发送，可持久化
 """
 import json
@@ -75,7 +75,7 @@ class HidPage(QWidget):
         splitter.setChildrenCollapsible(False)
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(20, 40, 20, 0)  # 左右统一留白，避免贴边
+        layout.setContentsMargins(20, 40, 20, 12)  # 与串口页一致，避免窗口边缘贴边
         layout.setSpacing(12)
         layout.addWidget(scroll)
         layout.addWidget(splitter, 1)
@@ -184,11 +184,6 @@ class HidPage(QWidget):
         grow.addWidget(self.featGetBtn)
         v.addLayout(grow)
 
-        self.featSendEdit = LineEdit(card)
-        self.featSendEdit.setPlaceholderText("HEX：首字节为报告 ID + 数据")
-        self.featSendBtn = PushButton("发送（写）", card)
-        v.addWidget(self.featSendEdit)
-        v.addWidget(self.featSendBtn)
         return card
 
     # ── 左：发送模板卡 ─────────────────────────────────────────
@@ -358,7 +353,6 @@ class HidPage(QWidget):
         self.featGetBtn.clicked.connect(
             lambda _=False: self.ht.sigFeatureGet.emit(
                 self.featIdBox.value(), self.featLenBox.value()))
-        self.featSendBtn.clicked.connect(self._on_feature_send)
 
         self.tplAddBtn.clicked.connect(self._tpl_add)
         self.tplDelBtn.clicked.connect(self._tpl_delete)
@@ -443,7 +437,6 @@ class HidPage(QWidget):
         self.closeBtn.setEnabled(opened)
         self.sendBtn.setEnabled(opened)
         self.featGetBtn.setEnabled(opened)
-        self.featSendBtn.setEnabled(opened)
         self.tplSendBtn.setEnabled(opened)
         if not opened:
             self._tpl_stop()
@@ -481,21 +474,6 @@ class HidPage(QWidget):
         if data is None:
             return
         self.ht.sigWrite.emit(data)
-
-    def _on_feature_send(self):
-        if not self.ht.worker.opened:
-            InfoBar.warning(title="未打开", content="HID 设备未打开",
-                            duration=3000, parent=self)
-            return
-        data, err = su.parse_hex_input(self.featSendEdit.text())
-        if data is None:
-            InfoBar.warning(title="HEX 无效",
-                            content=err or "特征报告需为 HEX（首字节为报告 ID）",
-                            duration=4000, parent=self)
-            return
-        self.ht.sigFeatureSend.emit(data)
-        self._append(f"{su.timestamp_str()} FEATURE-TX(ID={data[0]})  "
-                     + su.format_hex(data))
 
     # ── 模板管理 ───────────────────────────────────────────────
 

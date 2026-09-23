@@ -25,6 +25,7 @@ def _labeled_switch(sw: SwitchButton, text: str) -> None:
 
 class ConnectPanel(QWidget):
     # 对外信号（由 console_page 连接）
+    refreshRequested = pyqtSignal()
     openRequested = pyqtSignal(dict)
     closeRequested = pyqtSignal()
     dtrChanged = pyqtSignal(bool)
@@ -71,7 +72,7 @@ class ConnectPanel(QWidget):
         self.portCombo.setMinimumWidth(150)
         refreshBtn = ToolButton(FluentIcon.UPDATE, card)
         refreshBtn.setToolTip("刷新端口列表")
-        refreshBtn.clicked.connect(lambda _checked=False: self.refreshPorts())
+        refreshBtn.clicked.connect(lambda _checked=False: self.refreshRequested.emit())
         portRow = QHBoxLayout()
         portRow.addWidget(self.portCombo, 1)
         portRow.addWidget(refreshBtn)
@@ -172,7 +173,7 @@ class ConnectPanel(QWidget):
         v.addWidget(self.scrollSwitch)
 
         self.logSwitch = SwitchButton(card)
-        _labeled_switch(self.logSwitch, "保存原始日志")
+        _labeled_switch(self.logSwitch, "开始记录串口数据")
         self.logSwitch.checkedChanged.connect(self.logToggled.emit)
         v.addWidget(self.logSwitch)
 

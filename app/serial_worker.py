@@ -52,6 +52,7 @@ class SerialWorker(QObject):
         # dtr/rts 不是构造函数参数（pyserial 3.5），只能打开后经属性设置
         dtr = cfg.pop("dtr", None)
         rts = cfg.pop("rts", None)
+        ser = None
         try:
             if "://" in port:
                 ser = serial.serial_for_url(port, **cfg)
@@ -62,20 +63,33 @@ class SerialWorker(QObject):
             if rts is not None:
                 ser.rts = bool(rts)
         except Exception as e:
-            log.warning("串口打开失败 %s: %s", port, e)
-            self.openFailed.emit(str(e))
+            if ser is not None:
+                try:
+                    ser.close()
+                except Exception:
+                    pass
+            message = str(e) or e.__class__.__name__
+            log.warning("串口打开失败 %s: %s", port, message)
+            self.openFailed.emit(message)
             return
         self._ser = ser
         self._portName = port
         self._rxBuf.clear()
         # 详细参数：波特率/数据位/校验/停止位/流控（排查现场接线与配置）
-        log.info(
-            "串口已打开：%s baudrate=%s bytesize=%s parity=%s stopbits=%s "
-            "rtscts=%s xonxoff=%s dtr=%s rts=%s",
-            port, ser.baudrate, ser.bytesize, ser.parity, ser.stopbits,
-            ser.rtscts, ser.xonxoff,
-            ser.dtr if dtr is None else bool(dtr),
-            ser.rts if rts is None else bool(rts))
+        try:
+            log.info(
+                "串口已打开：%s baudrate=%s bytesize=%s parity=%s stopbits=%s "
+                "rtscts=%s xonxoff=%s dtr=%s rts=%s",
+                port, ser.baudrate, ser.bytesize, ser.parity, ser.stopbits,
+                ser.rtscts, ser.xonxoff,
+                ser.dtr if dtr is None else bool(dtr),
+                ser.rts if rts is None else bool(rts))
+        except Exception as e:
+            message = str(e) or e.__class__.__name__
+            log.warning("串口打开后读取状态失败 %s: %s", port, message)
+            self._closePort(notify=False)
+            self.openFailed.emit(message)
+            return
         self.portOpened.emit(port)
 
     @pyqtSlot()

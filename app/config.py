@@ -47,6 +47,9 @@ class Config(QConfig):
         validator=RangeValidator(10_000, 1_000_000),
     )
     logDir = ConfigItem("Serial", "LogDir", default="")
+    logFormat = OptionsConfigItem(
+        "Serial", "LogFormat", default="BIN",
+        validator=OptionsValidator(["BIN", "LOG"]))
 
     # 日志等级（设置页可运行时切换，即时生效）
     logLevel = OptionsConfigItem(
