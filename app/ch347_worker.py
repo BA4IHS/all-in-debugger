@@ -79,6 +79,17 @@ class Ch347Worker(QObject):
         return data
 
     def _op_scan(self, req):
+        # 已打开设备时绝不再枚举：scan_devices 会对索引 0~15 逐个
+        # Open/Close，若与当前已持有的索引重叠，等于对同一句柄重复
+        # 打开/关闭，会破坏 CH347 驱动内部状态（底层是内核态驱动，
+        # 异常时可导致蓝屏）。设备已打开时直接返回当前设备信息即可，
+        # 完全不触碰驱动。
+        if self._dev is not None:
+            try:
+                info = self._dev.info()
+            except Exception:  # noqa: BLE001 - 枚举失败不应影响已打开设备
+                info = {"index": self._dev.index}
+            return {"devices": [info], "library": cc.dll_info()}
         return {"devices": cc.scan_devices(), "library": cc.dll_info()}
 
     def _op_open(self, req):
@@ -144,6 +155,7 @@ class Ch347Worker(QObject):
 
     def _op_i2c_xfer(self, req):
         d = self._need_dev()
+        d.ensure_i2c_ready()      # 原始传输同样需先初始化 I2C
         write = cc.parse_hex(req.get("write_hex", ""))
         if not write:
             raise ValueError("写入数据为空（首字节须为 8bit 设备地址）")
@@ -152,12 +164,21 @@ class Ch347Worker(QObject):
 
     def _op_i2c_scan(self, req):
         d = self._need_dev()
-        addrs = d.i2c_scan()
+        rid = req.get("id")
+
+        def prog(done, total):
+            self.sigProgress.emit({"id": rid, "done": done,
+                                   "total": total, "label": "I2C 地址扫描"})
+
+        # 扫描前确保接口已初始化（否则总线事务全部立即失败，
+        # 表现为“秒扫完但一个器件都没有”）
+        addrs = d.i2c_scan(progress=prog)
         return {"addrs": [f"0x{a:02X}" for a in addrs]}
 
     def _op_i2c_reg_read(self, req):
         """读 count 个寄存器：每个寄存器地址读 width 字节（Repeated Start）。"""
         d = self._need_dev()
+        d.ensure_i2c_ready()      # 寄存器工具同样需先初始化 I2C
         addr = int(req["addr"]) & 0x7F
         reg = int(req.get("reg", 0))
         reg_wide = int(req.get("reg_wide", 8))
@@ -179,6 +200,7 @@ class Ch347Worker(QObject):
 
     def _op_i2c_reg_write(self, req):
         d = self._need_dev()
+        d.ensure_i2c_ready()      # 寄存器工具同样需先初始化 I2C
         addr = int(req["addr"]) & 0x7F
         reg = int(req.get("reg", 0))
         reg_wide = int(req.get("reg_wide", 8))
@@ -205,6 +227,7 @@ class Ch347Worker(QObject):
         loop = max(1, min(1000, int(req.get("loop", 1))))
         rid = req.get("id")
         d = self._need_dev()
+        d.ensure_i2c_ready()      # 脚本执行同样需先初始化 I2C
         reads = []
         done = 0
         total = len(steps) * loop

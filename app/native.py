@@ -48,10 +48,18 @@ def _find_file(name: str) -> Optional[Path]:
 
 _loaded = {}
 _load_errors = {}
+# 已记录过告警的 DLL：load_dll 会被 UI 快照/MCP/页面构造反复调用，
+# 失败时每次都打日志会刷屏（实测 CH347DLL 缺失时每 1.5s 刷一条）。
+_logged_failures = set()
 
 
 def load_dll(name: str, env_var: str = "") -> Optional[ctypes.WinDLL]:
-    """按名称加载 DLL，带缓存；失败返回 None 并记录原因。"""
+    """按名称加载 DLL，带缓存；失败返回 None 并记录原因。
+
+    同一种 DLL 的失败原因只记一次日志（后续调用静默返回 None，
+    仍可通过 load_error() 查询原因）。加载成功会清除该标记，
+    便于中途放入 DLL 后再次失败时重新告警。
+    """
     key = name.lower()
     if key in _loaded:
         return _loaded[key]
@@ -66,15 +74,20 @@ def load_dll(name: str, env_var: str = "") -> Optional[ctypes.WinDLL]:
         path = _find_file(name)
     if path is None:
         _load_errors[key] = f"未找到 {name}（请放入 {LIBS_DIR}）"
-        log.warning("原生库加载失败：%s", _load_errors[key])
+        if key not in _logged_failures:
+            _logged_failures.add(key)
+            log.warning("原生库加载失败：%s", _load_errors[key])
         return None
     try:
         dll = ctypes.WinDLL(str(path))
     except OSError as e:
         _load_errors[key] = f"加载 {name} 失败：{e}"
-        log.warning("原生库加载失败：%s", _load_errors[key])
+        if key not in _logged_failures:
+            _logged_failures.add(key)
+            log.warning("原生库加载失败：%s", _load_errors[key])
         return None
     _loaded[key] = dll
+    _logged_failures.discard(key)
     log.info("原生库已加载：%s <- %s", name, path)
     return dll
 

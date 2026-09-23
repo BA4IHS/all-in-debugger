@@ -62,6 +62,8 @@ class Ch347Page(QWidget):
         self._pending = {}          # rid -> callback(ok, data|error)
         self._prog = {}             # rid -> callback(progress dict)
         self._scan_once = False
+        self._device_signature = None
+        self._scan_busy = False
         # 持久化区（data.json["ch347"]）
         self._store = dict(loadData().get("ch347") or {})
 
@@ -111,11 +113,11 @@ class Ch347Page(QWidget):
         self.worker.sigOpResult.connect(self._on_result)
         self.worker.sigProgress.connect(self._on_progress)
 
-        # GPIO 自动刷新（500ms，仅 GPIO 页可见且设备已打开时请求）
-        self._gpioTimer = QTimer(self)
-        self._gpioTimer.setInterval(500)
-        self._gpioTimer.timeout.connect(self._gpio_tick)
-        self._gpioTimer.start()
+        # 设备插入检测（1.5s，仅未打开设备且页面可见时请求）
+        self._deviceTimer = QTimer(self)
+        self._deviceTimer.setInterval(1500)
+        self._deviceTimer.timeout.connect(self._device_tick)
+        self._deviceTimer.start()
 
     def _activateTab(self, key: str):
         """切到指定标签；首次激活时懒构建其内容（见 __init__ 注释）。
@@ -191,7 +193,7 @@ class Ch347Page(QWidget):
             self._scan()
 
     def shutdown(self):
-        self._gpioTimer.stop()
+        self._deviceTimer.stop()
         self._pending.clear()
         self._prog.clear()
 
@@ -207,7 +209,7 @@ class Ch347Page(QWidget):
         self.deviceCombo = ComboBox(card)
         self.deviceCombo.setMinimumWidth(300)
         self.scanBtn = PushButton("扫描", card, icon=FluentIcon.SEARCH)
-        self.scanBtn.clicked.connect(self._scan)
+        self.scanBtn.clicked.connect(lambda _=False: self._scan(notify=True))
         self.openBtn = PrimaryPushButton("打开", card)
         self.openBtn.clicked.connect(self._open)
         self.closeBtn = PushButton("关闭", card)
@@ -226,18 +228,46 @@ class Ch347Page(QWidget):
         v.addWidget(self.infoLabel)
         return card
 
-    def _scan(self):
-        self.scanBtn.setEnabled(False)
-        self._req("scan", cb=self._on_scan)
+    def _scan(self, notify=False):
+        if self._scan_busy:
+            return
+        self._scan_busy = True
+        if notify:
+            self.scanBtn.setEnabled(False)
+        self._req("scan", cb=lambda ok, data: self._on_scan(ok, data, notify))
 
-    def _on_scan(self, ok, data):
-        self.scanBtn.setEnabled(True)
+    @staticmethod
+    def _device_list_signature(devices):
+        return tuple(
+            (d.get("index"), d.get("chip_mode"), d.get("func_desc"),
+             d.get("chip_type_name"))
+            for d in devices)
+
+    def _device_tick(self):
+        """检测设备列表变化，只有插拔发生时才刷新下拉框。"""
+        if (not self.isVisible() or self._opened
+                or "scanBtn" not in self.__dict__
+                or self._scan_busy):
+            return
+        self._scan()
+
+    def _on_scan(self, ok, data, notify=False):
+        self._scan_busy = False
+        if notify:
+            self.scanBtn.setEnabled(True)
         if not ok:
             self.dllLabel.setText(str(data))
-            self._err("扫描失败", data)
+            if notify:
+                self._err("扫描失败", data)
             return
         self.dllLabel.setText(data.get("library") or "")
-        self._devices = data.get("devices") or []
+        devices = data.get("devices") or []
+        signature = self._device_list_signature(devices)
+        changed = signature != self._device_signature
+        self._device_signature = signature
+        if not changed and not notify:
+            return
+        self._devices = devices
         cur = self.deviceCombo.currentData()
         self.deviceCombo.clear()
         for d in self._devices:
@@ -693,16 +723,23 @@ class Ch347Page(QWidget):
     def _i2c_scan(self):
         if not self._need_ready("地址扫描"):
             return
+        self.i2cdevFound.setText("扫描中…（逐地址探测，请稍候）")
 
         def done(ok, data):
             if not ok:
+                self.i2cdevFound.setText("扫描失败")
                 self._err("地址扫描失败", data)
                 return
             addrs = data.get("addrs") or []
             self.i2cdevFound.setText(
                 f"发现 {len(addrs)} 个器件：" + " ".join(addrs)
                 if addrs else "未发现 ACK 器件（检查上电/接线/地址）")
-        self._req("i2c_scan", cb=done)
+
+        def prog(msg):
+            self.i2cdevFound.setText(
+                f"扫描中… {msg.get('done', 0)}/{msg.get('total', 0)} 地址")
+
+        self._req("i2c_scan", cb=done, progress=prog)
 
     def _i2c_reg_params(self):
         try:
@@ -920,10 +957,8 @@ class Ch347Page(QWidget):
         bSet.clicked.connect(lambda: self._gpio_apply())
         bGet = PushButton("读取状态", card)
         bGet.clicked.connect(self._gpio_read)
-        self.gpioAuto = CheckBox("500ms 自动刷新", card)
         brow.addWidget(bSet)
         brow.addWidget(bGet)
-        brow.addWidget(self.gpioAuto)
         brow.addStretch(1)
         cv.addLayout(brow)
         v.addWidget(card)
@@ -1055,17 +1090,6 @@ class Ch347Page(QWidget):
             self._log(self.gpioOut, f"dir={dr:02X} data={val:02X}")
         self._gpio_poll_busy = True
         self._req("gpio_get", cb=done)
-
-    def _gpio_tick(self):
-        # GPIO 标签懒构建：未构建时 self.gpioAuto 等尚不存在，直接跳过
-        if "gpio" not in self._tabBuilt:
-            return
-        if not (self.gpioAuto.isChecked() and self._opened
-                and not self._gpio_poll_busy
-                and self.isVisible()
-                and self.stack.currentIndex() == self._tabIdx.get("gpio")):
-            return
-        self._gpio_read()
 
     # 宏编辑：表列 (pin, level, delay)，存 data.json ch347.gpio_macros
 

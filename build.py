@@ -17,6 +17,10 @@
       会递归整个 app/libs，故复制后显式剔除，并在归档前强制自检
     - 无终端模式：--windows-console-mode=disable（不弹控制台），
       编译后自动校验 exe 的 PE 子系统为 WINDOWS_GUI（Subsystem=2）
+    - 管理员权限：--windows-uac-admin 把 requireAdministrator 清单写进
+      exe，启动即弹 UAC。安装在 Program Files 下必须提权，否则
+      config.json/data.json/logs 均无写权限；编译后校验清单已嵌入。
+      提权后登录动画子进程继承同一令牌，不会二次弹框。
     - 体积优化：--lto=yes + 排除 Qt tls 插件/翻译 + 裁剪无用图片格式插件
 
 前置要求：
@@ -89,6 +93,11 @@ def build_args() -> list:
         "--nofollow-import-to=numpy,scipy,PIL,colorthief",
         # ---- Windows 形态与版本信息 ----
         "--windows-console-mode=disable",   # GUI 程序，不弹控制台（编译后另有 PE 子系统校验）
+        # 启动即申请管理员权限：安装在 Program Files 下必须提权，否则
+        # config.json/data.json/logs 都写不进去（程序目录只读）。
+        # 清单方式由系统在进程创建前弹 UAC，比运行期 ShellExecuteW
+        # 自行重启更干净：只有一个进程，子进程继承同一提权令牌。
+        "--windows-uac-admin",
         # ---- 体积优化（Nuitka 4.1.3 参数已核实）----
         "--lto=yes",                        # 链接期优化；编译器不支持时会报错，可改回 auto
         "--mingw64",                       # 使用 MinGW64 编译器（MSVC 需手动安装 VS Build Tools）
@@ -318,6 +327,31 @@ def make_archive():
     print(f"[build] 归档完成：{target}")
 
 
+def check_uac_manifest():
+    """校验 exe 已嵌入 requireAdministrator 清单。
+
+    缺了它程序会以普通权限启动，装在 Program Files 下将无法写入
+    config.json/data.json/logs（表现为设置无法保存、日志静默丢失）。
+    清单以明文 XML 存在 RT_MANIFEST 资源里，UTF-8 或 UTF-16LE 任一命中即可。
+    """
+    exe = BUNDLE_DIR / "all-in-debugger.exe"
+    if not exe.is_file():
+        print(f"[build] 警告：未找到 {exe}，跳过 UAC 清单检查", file=sys.stderr)
+        return False
+    data = exe.read_bytes()
+    marker = "requireAdministrator"
+    ok = (marker.encode("utf-8") in data
+          or marker.encode("utf-16-le") in data)
+    if ok:
+        print("[build] UAC 清单检查：requireAdministrator 已嵌入 ✓"
+              "（双击启动即申请管理员权限）")
+    else:
+        print("[build] 警告：exe 清单未申请管理员权限，安装在 Program Files "
+              "下将无法写配置与日志！", file=sys.stderr)
+        print("[build] 请确认 build_args 含 --windows-uac-admin", file=sys.stderr)
+    return ok
+
+
 def check_lazy_modules():
     """验证延迟构造页面模块已编译进 exe。
 
@@ -363,7 +397,8 @@ def main():
         print("[build] 将要执行的命令（--dry-run）：")
         print("  " + " ".join(build_args()))
         print("[build] 编译后将自动执行：Qt 插件裁剪 → 配置文件泄漏检查 → exe 子系统检查（无终端）")
-        print("[build]                  → libs 复制（跳过禁止分发目录）→ 商业工具剔除与自检")
+        print("[build]                  → UAC 清单检查（管理员权限）→ libs 复制（跳过禁止分发目录）"
+              "→ 商业工具剔除与自检")
         print(f"[build] 归档目标：{ARCHIVE_BASE}.7z / .zip")
         return
 
@@ -383,6 +418,9 @@ def main():
     if not check_gui_subsystem():
         print("[build] 警告：exe 存在控制台窗口风险，请检查 --windows-console-mode",
               file=sys.stderr)
+    if not check_uac_manifest():
+        print("[build] 警告：exe 未申请管理员权限，安装在 Program Files "
+              "下将无法写配置！", file=sys.stderr)
     ensure_libs_copied()
     if not check_no_commercial_leak():
         print("[build] 错误：产物含禁止分发的商业工具，已中止归档！", file=sys.stderr)

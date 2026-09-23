@@ -36,6 +36,22 @@ DAP_SWD_CONFIGURE = 0x13
 
 DAP_INFO_PACKET_SIZE = 0xFE
 
+# CMSIS-DAP 调试器的已知 WinUSB VID:PID 白名单。
+# 被动枚举（verify=False）不能打开设备发 DAP_Info，只能靠这份名单过滤：
+# 列出未知 VID:PID 会误报普通 WinUSB 设备，不列则漏掉新调试器——
+# 因此手动刷新仍走 verify=True 在线验证，本名单只用于后台自动刷新。
+_DAP_VID_PIDS = {
+    (0x0D28, 0x0204),   # ARM mbed DAPLink（CMSIS-DAP v2）
+    (0xC251, 0x2722),   # Keil ULINKplus
+    (0xC251, 0x2750),   # Keil ULINK2/ME
+    (0x1FC9, 0x0132),   # NXP LPC-Link2
+    (0x1FC9, 0x0143),   # NXP MCU-Link
+    (0x1366, 0x0105),   # SEGGER J-Link（CMSIS-DAP 兼容模式）
+    (0x1366, 0x1015),   # SEGGER J-Link OB
+    (0x2E8A, 0x000C),   # Raspberry Pi Debug Probe
+    (0x1A86, 0x55DE),   # WCH-Link（RISCV/DAP）
+}
+
 # DAP_Connect 端口
 # CMSIS-DAP 规范（官方固件 DAP.h）：0=自动/禁用，1=SWD，2=JTAG
 DAP_PORT_SWD = 1
@@ -128,11 +144,13 @@ def enum_probes(verify: bool = False) -> List[dict]:
 
     v1：HID 枚举 usage_page=0xFF00 + usage=0x0001 或产品名含 cmsis-dap。
     v2：WinUSB 接口无描述符级过滤手段（实测 DeviceDesc/FriendlyName 接口
-    属性不存在），只能逐个打开后发 DAP_Info 在线验证；verify=False 时按
-    产品名含 cmsis-dap 粗筛（路径中无法取产品名，故保守全部列出并标记）。
+    属性不存在），只能按已知 VID:PID 白名单粗筛，或打开后在线验证；
+    verify=False 时用白名单过滤（不打开设备），verify=True 时逐个打开验证。
 
-    verify=True 时逐个候选发 DAP_Info 在线验证：触摸屏等 vendor HID
-    会冒充 0xFF00/0x0001，仅凭枚举字段无法区分（打开失败/无 DAP 响应即排除）。
+    重要：verify=True 会打开设备并发送 DAP_Info 命令。外部工具
+    （Keil/IAR/OpenOCD）正在烧录时这样做会打断其 SWD 事务，对方报
+    "RDDI-DAP Error / Flash Download failed"。因此后台自动刷新必须用
+    verify=False（纯被动，不触碰设备），仅手动刷新/连接时才在线验证。
 
     返回字典统一字段：path/vid/pid/product/transport（"hid"|"winusb"）。
     """
@@ -157,6 +175,10 @@ def enum_probes(verify: bool = False) -> List[dict]:
         if verify:
             if not _verify_dap_winusb(path):
                 continue
+        elif (vid, pid) not in _DAP_VID_PIDS:
+            # 被动模式无法发 DAP_Info，只能用已知 VID:PID 白名单过滤，
+            # 否则会把所有 WinUSB 设备都列进来
+            continue
         item = {
             "path": path,  # str 类型，与 HID 的 bytes path 区分
             "vid": vid, "pid": pid,

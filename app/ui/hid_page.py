@@ -19,7 +19,7 @@ from PyQt6.QtWidgets import (
 from qfluentwidgets import (
     BodyLabel, CaptionLabel, CardWidget, CheckBox, ComboBox, FluentIcon,
     InfoBar, LineEdit, PrimaryPushButton, PushButton,
-    SingleDirectionScrollArea, SpinBox, SubtitleLabel, SwitchButton,
+    ScrollArea, SpinBox, SubtitleLabel, SwitchButton,
     TableWidget, TogglePushButton, ToolButton,
 )
 
@@ -48,10 +48,14 @@ class HidPage(QWidget):
         self._seq = []               # 批量发送队列 [(bytes, delay_ms)]
         self._seq_idx = 0
         self._seq_loop = False
+        self._device_signature = None
 
         # ── 布局 ────────────────────────────────────────────────
-        scroll = SingleDirectionScrollArea(self)
+        scroll = ScrollArea(self)
         left = QWidget()
+        # 左栏外宽包含滚动条和边界，内容列固定为安全宽度，
+        # 避免设备刷新、特征报告等右侧控件被裁切。
+        left.setFixedWidth(318)
         ll = QVBoxLayout(left)
         ll.setContentsMargins(0, 0, 0, 0)
         ll.setSpacing(12)
@@ -362,10 +366,16 @@ class HidPage(QWidget):
         self._periodTimer = QTimer(self)
         self._periodTimer.setSingleShot(False)
         self._periodTimer.timeout.connect(self._tpl_tick)
+        self._deviceTimer = QTimer(self)
+        self._deviceTimer.setInterval(1500)
+        self._deviceTimer.timeout.connect(self._device_tick)
+        self._deviceTimer.start()
 
     # ── 枚举 / 打开 ────────────────────────────────────────────
 
     def enumerate(self, notify=False):
+        if not notify and (not self.isVisible() or self.ht.worker.opened):
+            return
         vid = self._parse_filter(self.vidEdit.text())
         pid = self._parse_filter(self.pidEdit.text())
         if vid is None or pid is None:
@@ -377,6 +387,13 @@ class HidPage(QWidget):
         except NativeError as e:
             InfoBar.error(title="枚举失败", content=str(e),
                           duration=6000, parent=self)
+            return
+        signature = tuple(
+            (d.get("path"), d.get("vid"), d.get("pid"), d.get("serial"))
+            for d in devs)
+        changed = signature != self._device_signature
+        self._device_signature = signature
+        if not changed and not notify:
             return
         self._devices = devs
         cur = self.deviceCombo.currentIndex()
@@ -390,6 +407,9 @@ class HidPage(QWidget):
         if notify:
             InfoBar.success(title="枚举完成", content=f"发现 {len(devs)} 个 HID 设备",
                             duration=3000, parent=self)
+
+    def _device_tick(self):
+        self.enumerate(notify=False)
 
     @staticmethod
     def _parse_filter(text: str):
@@ -677,5 +697,6 @@ class HidPage(QWidget):
 
     def shutdown(self):
         self._periodTimer.stop()
+        self._deviceTimer.stop()
         self._tpl_commit_edits()
         self._save_templates()

@@ -68,6 +68,7 @@ class AdbPage(QWidget):
         self._commands = []              # 当前型号的全部命令
         self._filtered_commands = []     # 当前搜索结果
         self._fileManagers = set()       # 独立顶层文件管理窗口
+        self._mcpBusySerial = ""         # MCP 正在使用的设备（非空则徽标提示）
 
         # ── 布局：左=连接+命令集；右=终端；底=采集选项细条 ───────
         left = QWidget(self)
@@ -100,6 +101,13 @@ class AdbPage(QWidget):
         self._refresh_adb_label()
         self.reload_models(preselect_default=True)
         self.refresh_serials()
+
+        # 设备列表轮询：人工插拔设备、或 MCP 改变了设备状态时，左侧自动跟随。
+        # adb devices -l 是只读查询，不会打断已打开的交互 shell。
+        self._deviceTimer = QTimer(self)
+        self._deviceTimer.setInterval(3000)
+        self._deviceTimer.timeout.connect(self._device_tick)
+        self._deviceTimer.start()
 
     def minimumSizeHint(self):
         # 终端 + 命令面板的默认 minimumSizeHint 过大，被 QStackedLayout
@@ -379,6 +387,12 @@ class AdbPage(QWidget):
         i = self.serialCombo.currentIndex()
         return self._serial_items[i] if 0 <= i < len(self._serial_items) else ""
 
+    def _device_tick(self):
+        """后台轮询设备列表；页面不可见或上次探测未完成时跳过。"""
+        if not self.isVisible() or self._deviceProbe.is_running():
+            return
+        self.refresh_serials(notify=False)
+
     def reload_models(self, preselect_default=False):
         self._model_items = ar.list_profiles()
         # 处理重名：重名时 label 追加 [stem]
@@ -532,6 +546,29 @@ class AdbPage(QWidget):
         if self.shell.is_running():
             self.shell.write(data)
 
+    def on_mcp_output(self, data: bytes):
+        """把 MCP ADB 命令的实时输出投递到同一个终端。"""
+        self.terminal.queue_bytes(bytes(data))
+
+    def on_mcp_devices(self, devs):
+        """MCP 侧枚举到设备后同步左侧下拉，保证人工与 AI 看到同一份列表。"""
+        self._apply_serial_devices(
+            [{"serial": d.get("serial", ""), "state": d.get("state", ""),
+              "info": d.get("info", "")} for d in (devs or [])])
+
+    def on_mcp_activity(self, serial: str, phase: str):
+        """MCP 正在使用某个设备时在左侧徽标提示，避免人工同时操作冲突。"""
+        if phase == "start":
+            name = self._current_serial() or serial or "ADB"
+            self._mcpBusySerial = serial
+            self._set_badge("attention", f"AI 使用中 {name}")
+        elif phase == "done":
+            self._mcpBusySerial = ""
+            if self.shell.is_running():
+                self._set_badge("success", "Shell 已连接")
+            else:
+                self._set_badge("attention", "未连接")
+
     def _toggle_shell(self):
         if self.shell.is_running():
             self.shell.stop()
@@ -645,6 +682,7 @@ class AdbPage(QWidget):
         self._badgeBox.insertWidget(0, self._badge)
 
     def shutdown(self):
+        self._deviceTimer.stop()
         self.terminal.discard_queued_bytes()
         self._deviceProbe.shutdown()
         self._versionProbe.shutdown()

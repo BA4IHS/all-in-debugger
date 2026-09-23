@@ -52,6 +52,14 @@ class SerialWorker(QObject):
         # dtr/rts 不是构造函数参数（pyserial 3.5），只能打开后经属性设置
         dtr = cfg.pop("dtr", None)
         rts = cfg.pop("rts", None)
+        # 防御性兜底：write_timeout 缺省（pyserial 默认 None）意味着
+        # ser.write() 可能无限阻塞，一次写入就能永久卡死整个 worker 线程
+        # （串口随即“卡死”：不再收数据、不再响应任何操作）。任何调用路径
+        # （UI/MCP/未来新增）漏设时都补上有限值。
+        if cfg.get("write_timeout") is None:
+            cfg["write_timeout"] = 1
+        if cfg.get("timeout") is None:
+            cfg["timeout"] = 0.05
         ser = None
         try:
             if "://" in port:
@@ -104,7 +112,11 @@ class SerialWorker(QObject):
             return
         try:
             n = ser.write(bytes(data))
-            ser.flush()
+            # 不调用 ser.flush()：pyserial 的 flush() 会一直等到发送缓冲
+            # 真正排空，且不受 write_timeout 约束——对端不接收/流控未放行
+            # 时它同样能无限阻塞 worker 线程（与 write_timeout 缺失是同一
+            # 类卡死）。write() 返回的字节数已足够确认发送结果，数据由
+            # 驱动异步送出，无需在此同步等待。
             if log.isEnabledFor(logging.DEBUG):
                 log.debug("串口 TX %s %d 字节：%s", self._portName,
                           len(data), hexPreview(data))

@@ -396,6 +396,11 @@ class MainWindow(SplitFluentWindow):
             from app.mcp_server import McpService
             bridge = WorkerBridge(self.st, self.ht, self.dt, self.mt,
                                   self.sht, self.tp, self.cct)
+            adb_page = self.pages.get("adb")
+            if adb_page is not None:
+                bridge.adbOutput.connect(adb_page.on_mcp_output)
+                bridge.adbDeviceList.connect(adb_page.on_mcp_devices)
+                bridge.adbActivity.connect(adb_page.on_mcp_activity)
             self._mcpService = McpService(
                 bridge, qconfig.get(cfg.mcpPort),
                 qconfig.get(cfg.mcpToken),

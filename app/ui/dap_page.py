@@ -11,7 +11,7 @@
 import re
 import time
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QTimer, Qt
 from PyQt6.QtGui import QBrush, QColor, QFont, QIntValidator, QTextCharFormat
 from PyQt6.QtWidgets import (
     QFileDialog, QHBoxLayout, QRadioButton, QSplitter, QVBoxLayout, QWidget,
@@ -71,6 +71,7 @@ class DapPage(QWidget):
         self._buffers = {}           # 通道编号 → 文本缓冲（保留 ANSI 转义码）
         self._rx = 0
         self._tx = 0
+        self._connected = False
         # ANSI SGR 流式解析状态（跨数据块累积）
         self._ansi_pending = ""     # 未完成的转义序列
         self._ansi_fmt = QTextCharFormat()   # 当前生效的字符格式
@@ -80,6 +81,7 @@ class DapPage(QWidget):
         self._chip_items = []        # [(stem, name, data), ...] 芯片包列表
         self._active_chip = None     # 当前选中的芯片包数据
         self._clock_touched = False  # 用户手动改过 SWD 速度则不再被芯片包覆盖
+        self._probe_signature = None
 
         scroll = SingleDirectionScrollArea(self)
         left = QWidget()
@@ -112,6 +114,10 @@ class DapPage(QWidget):
         layout.addWidget(splitter, 1)
 
         self._connect_signals()
+        self._probeTimer = QTimer(self)
+        self._probeTimer.setInterval(1500)
+        self._probeTimer.timeout.connect(self._probe_tick)
+        self._probeTimer.start()
         self._set_connected(False)
         self.dllLabel.setText(dap_core.load_info())
         self._on_cb_mode()
@@ -494,13 +500,27 @@ class DapPage(QWidget):
 
     # ── 枚举 / 连接 ────────────────────────────────────────────
 
-    def _enum_probes(self, notify=False):
+    def _enum_probes(self, notify=False, verify=True):
+        """枚举调试器。
+
+        verify=True（手动刷新）逐个候选发 DAP_Info 在线验证，能排除
+        冒充 0xFF00 的触摸屏；verify=False（后台自动刷新）只读描述符，
+        绝不打开设备，以免打断外部工具（Keil/IAR）正在进行的烧录。
+        """
         try:
-            # verify=True：逐个候选发 DAP_Info，排除假冒 0xFF00 的触摸屏等设备
-            self._probes = dap_core.enum_probes(verify=True)
+            self._probes = dap_core.enum_probes(verify=verify)
         except Exception as e:
-            InfoBar.error(title="枚举失败", content=str(e),
-                          duration=5000, parent=self)
+            if notify:
+                InfoBar.error(title="枚举失败", content=str(e),
+                              duration=5000, parent=self)
+            return
+        signature = tuple(
+            (p.get("path"), p.get("vid"), p.get("pid"),
+             p.get("serial"), p.get("transport"))
+            for p in self._probes)
+        changed = signature != self._probe_signature
+        self._probe_signature = signature
+        if not changed and not notify:
             return
         self.probeCombo.clear()
         for p in self._probes:
@@ -513,6 +533,17 @@ class DapPage(QWidget):
             InfoBar.success(title="枚举完成",
                             content=f"发现 {len(self._probes)} 个调试器",
                             duration=3000, parent=self)
+
+    def _probe_tick(self):
+        """后台自动刷新：只做被动枚举，绝不打开设备。
+
+        verify=True 会打开调试器并发 DAP_Info，若外部工具（Keil/IAR/
+        OpenOCD）正在烧录，这一下就会打断它的 SWD 事务，对方报
+        “RDDI-DAP Error / Flash Download failed”。因此自动刷新只枚举
+        描述符（不触碰设备），需要在线验证请手动点刷新按钮。
+        """
+        if self.isVisible() and not self._connected:
+            self._enum_probes(notify=False, verify=False)
 
     def _update_probe_tooltip(self, *_):
         """调试器下拉文本过长被裁时，悬停可看完整项文本。"""
@@ -574,6 +605,9 @@ class DapPage(QWidget):
             return 0
 
     def _on_probe_opened(self, idcode_str: str):
+        # 探针句柄此时已经由 worker 持有，即使 RTT 控制块尚未找到，
+        # 也必须停止自动枚举，避免再次打开同一调试器造成 RTT 轮询失败。
+        self._connected = True
         self.statusLabel.setText(f"SWD 已连接  {idcode_str}\n正在查找 RTT 控制块…")
         # 打开即允许断开/复位：RTT 未找到/解析失败等路径不会卡死按钮，
         # 连接不可用时直接点「断开」重置（probe 在 worker 内关闭）即可
@@ -630,6 +664,7 @@ class DapPage(QWidget):
         combo.blockSignals(False)
 
     def _set_connected(self, on: bool):
+        self._connected = bool(on)
         self.openBtn.setEnabled(not on)
         self.closeBtn.setEnabled(on)
         self.resetBtn.setEnabled(on)
@@ -888,4 +923,5 @@ class DapPage(QWidget):
             sb.setValue(sb.maximum())
 
     def shutdown(self):
+        self._probeTimer.stop()
         pass

@@ -695,6 +695,11 @@ def _check(ok, what: str):
 
 # ── 设备枚举与句柄封装（仅 worker 线程使用）───────────────────────────
 
+# 本进程已通过 Ch347Device 打开的索引集合；scan_devices 会跳过它们，
+# 避免对同一设备重复 Open/Close 破坏驱动状态（严重时可蓝屏）。
+_open_indexes = set()
+
+
 def _infor_to_dict(inf: DEVICE_INFOR) -> dict:
     def s(raw):
         return bytes(raw or b"").split(b"\x00", 1)[0].decode(
@@ -717,11 +722,17 @@ def scan_devices() -> List[dict]:
     """索引 0~15 逐个试探：Open→GetDeviceInfor→Close。
 
     过滤 ChipMode==3（Mode3 接口为 JTAG+I2C，无 SPI/GPIO）的设备。
+
+    已被本进程 Ch347Device 占用的索引会被跳过：对同一句柄重复
+    Open/Close 会破坏 CH347 驱动内部状态（底层为内核态驱动，
+    异常时可导致蓝屏），因此枚举绝不触碰正在使用的设备。
     """
     api = _api()
     out = []
     inf = DEVICE_INFOR()
     for i in range(16):
+        if i in _open_indexes:
+            continue
         h = api.CH347OpenDevice(i)
         if h in _INVALID_HANDLES:
             continue
@@ -746,12 +757,16 @@ class Ch347Device:
 
     def __init__(self, index: int, fast_timeout_ms: int = 500):
         self.index = int(index)
+        if self.index in _open_indexes:
+            raise Ch347Error(
+                f"设备 {self.index}# 已在本程序内打开，请勿重复打开")
         self._api = _api()
         h = self._api.CH347OpenDevice(self.index)
         if h in _INVALID_HANDLES:
             raise Ch347Error(f"打开设备 {self.index}# 失败："
                              "请确认已插入 CH347 且未被其他程序占用")
         self._opened = True
+        _open_indexes.add(self.index)
         try:
             self._api.CH347SetTimeout(self.index, fast_timeout_ms,
                                       fast_timeout_ms)
@@ -766,6 +781,7 @@ class Ch347Device:
     def close(self):
         if self._opened:
             self._opened = False
+            _open_indexes.discard(self.index)
             try:
                 self._api.CH347CloseDevice(self.index)
             except Exception:      # noqa: BLE001 - 关闭失败无补救
@@ -858,6 +874,22 @@ class Ch347Device:
         self._api.CH347I2C_SetStretch(self.index, 1 if stretch else 0)
         if delay_ms:
             self._api.CH347I2C_SetDelaymS(self.index, int(delay_ms))
+        self._i2c_ready = True
+        self._i2c_speed = speed & 7
+
+    def ensure_i2c_ready(self, speed: int = 2) -> None:
+        """确保 I2C 接口已初始化（未初始化或速率变化时按 speed 初始化）。
+
+        CH347 的 I2C 必须先 CH347I2C_Set 才能收发，否则后续
+        CH347StreamI2C_RetACK 直接返回失败。此前只有「I2C」标签页的手动
+        初始化按钮会调用它，「I2C 器件」页扫描/读写前从不初始化，于是
+        每次探测都在未初始化状态立即失败——这会让 117 个地址瞬间“扫完”
+        且一个器件都找不到。这里按需自动补初始化，默认 400KHz。
+        """
+        speed &= 7
+        if (not getattr(self, "_i2c_ready", False)
+                or getattr(self, "_i2c_speed", None) != speed):
+            self.i2c_init(speed=speed)
 
     def i2c_xfer(self, write, read_len: int = 0):
         """write 首字节 = 8bit 设备地址（addr<<1 | R/W）。返回 (data, ack)。
@@ -876,16 +908,38 @@ class Ch347Device:
             "I2C 传输")
         return bytes(orb.raw[:rl]), int(ack.value)
 
-    def i2c_scan(self) -> List[int]:
-        """扫描 0x03~0x77，返回 ACK 的 7bit 地址列表。"""
+    def i2c_scan(self, progress=None) -> List[int]:
+        """逐地址扫描 0x03~0x77，返回 ACK 的 7bit 地址列表。
+
+        真正的扫描必须一个一个地址发探测，每次都有 I2C 总线事务开销
+        （未应答的地址要等超时），117 个地址不可能瞬间返回。若整轮全部
+        探测都失败（不是“没器件”，而是接口/接线/供电异常），抛 Ch347Error
+        说明原因，避免把硬件故障显示成“扫描完成但无器件”。
+
+        progress: 可选回调 (done, total)，供 UI 显示进度。
+        """
+        self.ensure_i2c_ready()
+        addrs = list(range(0x03, 0x78))
+        total = len(addrs)
         found = []
-        for a in range(0x03, 0x78):
+        errors = 0
+        last_err = None
+        for i, a in enumerate(addrs):
             try:
                 _, ack = self.i2c_xfer(bytes([a << 1]), 0)
                 if ack == 0:
                     found.append(a)
-            except Ch347Error:
-                continue
+            except Ch347Error as e:
+                # 单个地址探测失败（无应答等）属正常，继续下一个；
+                # 但若整轮全失败，说明是接口级故障，下面统一报错。
+                errors += 1
+                last_err = e
+            if progress:
+                progress(i + 1, total)
+        if not found and errors == total:
+            raise Ch347Error(
+                "I2C 扫描失败：全部地址均无响应。请检查器件上电、SDA/SCL 接线"
+                f"与上拉电阻（底层错误：{last_err}）")
         return found
 
     # ── GPIO ─────────────────────────────────────────────────────

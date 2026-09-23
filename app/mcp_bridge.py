@@ -8,12 +8,14 @@
 
 所有对外方法抛 BridgeError 表示可传达给 AI 调用方的错误。
 """
+import queue
 import subprocess
 import sys
 import threading
+import time
 import uuid
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QObject, Qt, pyqtSignal
 
 
 class BridgeError(RuntimeError):
@@ -51,10 +53,15 @@ def parse_hex(text: str) -> bytes:
     return bytes(vals)
 
 
-class WorkerBridge:
+class WorkerBridge(QObject):
     """把同步调用转发到各 worker 线程，与 GUI 共享同一连接。"""
 
+    adbOutput = pyqtSignal(bytes)  # MCP ADB 命令实时输出到 ADB 页面终端
+    adbDeviceList = pyqtSignal(list)  # MCP 枚举到的设备，同步左侧设备下拉
+    adbActivity = pyqtSignal(str, str)  # (serial, phase) phase: start/done
+
     def __init__(self, st, ht, dt, mt, sht=None, tp=None, cct=None):
+        super().__init__()
         self.st = st   # SerialThread
         self.ht = ht   # HidThread
         self.dt = dt   # DapThread
@@ -187,9 +194,14 @@ class WorkerBridge:
 
     def serial_open(self, port: str, baudrate: int = 115200, bytesize: int = 8,
                     parity: str = "N", stopbits: float = 1):
+        # write_timeout 必须显式设置：pyserial 默认 write_timeout=None 是
+        # 无限阻塞，硬件流控/对端不接收时 ser.write() 会永久卡住 worker
+        # 线程，表现为串口整体卡死（不再收数据、不再响应任何操作）。
+        # 与 UI 侧 build_open_config 保持一致。
         cfg = {"port": str(port), "baudrate": int(baudrate),
                "bytesize": int(bytesize), "parity": str(parity)[:1].upper(),
-               "stopbits": float(stopbits), "timeout": 0.05}
+               "stopbits": float(stopbits), "timeout": 0.05,
+               "write_timeout": 1}
         args = self._emit_wait(
             [self.st.worker.portOpened], [self.st.worker.openFailed],
             lambda: self.st.sigOpen.emit(cfg), DEFAULT_TIMEOUT, "打开串口")
@@ -528,28 +540,77 @@ class WorkerBridge:
         return path
 
     def _run_adb(self, args, timeout: float) -> str:
+        """执行 adb 子命令，输出分块实时转发给 ADB 页终端，并整体返回。
+
+        统一走 Popen 分块读取（不用 subprocess.run）：subprocess.run 只在
+        进程结束后一次性给出全部输出，MCP 调用期间 ADB 页面终端会一直空白，
+        无法像串口那样边跑边看。读取线程只负责把字节塞进队列，本方法在调用
+        线程内按块 emit，避免跨线程直接触碰 Qt 信号。
+        """
         timeout = max(1.0, min(float(timeout), ADB_TIMEOUT_CAP))
-        kwargs = dict(capture_output=True, text=True, timeout=timeout,
-                      encoding="utf-8", errors="replace")
-        if sys.platform == "win32":
-            kwargs["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
+        # 与「全部采集」同款青色命令头：终端里能一眼看出哪段输出属于哪次
+        # MCP 调用，避免多次调用输出混在一起无法区分。
+        header = "\x1b[36m── [MCP] $ adb {} ──\x1b[0m\r\n".format(
+            " ".join(str(a) for a in args))
+        self.adbOutput.emit(header.encode("utf-8"))
+        kwargs = dict(stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                      creationflags=0x08000000 if sys.platform == "win32" else 0)
+        proc = None
         try:
-            r = subprocess.run([self._adb_path(), *args], **kwargs)
-        except subprocess.TimeoutExpired:
-            raise BridgeError(f"adb 命令超时（{timeout:g}s）") from None
+            proc = subprocess.Popen([self._adb_path(), *args], **kwargs)
+            chunks = queue.Queue()
+
+            def read_output():
+                try:
+                    while True:
+                        chunk = proc.stdout.read(4096)
+                        if not chunk:
+                            break
+                        chunks.put(chunk)
+                finally:
+                    chunks.put(None)
+
+            reader = threading.Thread(target=read_output, daemon=True)
+            reader.start()
+            parts = []
+            deadline = time.monotonic() + timeout
+            timed_out = False
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    timed_out = True
+                    break
+                try:
+                    chunk = chunks.get(timeout=min(0.1, remaining))
+                except queue.Empty:
+                    # 命令可能暂时无输出（如 adb pull 传输中），继续等到超时
+                    continue
+                if chunk is None:
+                    break
+                parts.append(chunk)
+                self.adbOutput.emit(bytes(chunk))
+            if timed_out:
+                proc.kill()
+                proc.wait(timeout=2.0)
+                raise BridgeError(f"adb 命令超时（{timeout:g}s）")
+            proc.wait(timeout=max(0.1, deadline - time.monotonic()))
+            out = b"".join(parts).decode("utf-8", "replace")
+            if proc.returncode != 0:
+                raise BridgeError(
+                    f"adb 退出码 {proc.returncode}：{out.strip() or '无输出'}")
+            return out
         except Exception as e:
+            if isinstance(e, BridgeError):
+                raise
             raise BridgeError(f"adb 执行失败：{e}") from None
-        out = (r.stdout or "") + (r.stderr or "")
-        if r.returncode != 0:
-            raise BridgeError(
-                f"adb 退出码 {r.returncode}：{out.strip() or '无输出'}")
-        return out
 
     def adb_devices(self):
         from app import adb_runner
         devs, err = adb_runner.list_adb_devices(self._adb_path())
         if err:
             raise BridgeError(f"枚举设备失败：{err}")
+        # 同步到 ADB 页左侧设备下拉：AI 枚举设备后，人工也能直接看到同一列表
+        self.adbDeviceList.emit([dict(d) for d in devs])
         return devs
 
     def adb_shell(self, serial: str, command: str, timeout: float = 15.0):
@@ -557,7 +618,12 @@ class WorkerBridge:
         if serial:
             args += ["-s", str(serial)]
         args += ["shell", str(command)]
-        return self._run_adb(args, timeout)
+        # 供左侧状态徽标显示「AI 使用中」，结束后恢复，方便人工判断占用
+        self.adbActivity.emit(str(serial or ""), "start")
+        try:
+            return self._run_adb(args, timeout)
+        finally:
+            self.adbActivity.emit(str(serial or ""), "done")
 
     def adb_list_dir(self, serial: str, path: str):
         import shlex
