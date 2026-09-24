@@ -423,8 +423,25 @@ class Ch347Page(QWidget):
         row.addWidget(BodyLabel("读取长度", xfer))
         self.spiRxLen = SpinBox(xfer)
         self.spiRxLen.setRange(0, 65535)
-        self.spiRxLen.setValue(8)
+        # 默认 0 = 纯交换：只交换发送框里的字节，与原厂 StreamSpi 行为一致
+        # （原厂 OutData(2):AA BB → InData(2):AA BB）。需要「先写后读」时
+        # 填非 0，会在发送数据之后再交换相应字节数用于接收。
+        self.spiRxLen.setValue(0)
+        self.spiRxLen.setToolTip(
+            "0 = 仅交换发送框内容（同原厂 StreamSpi）；\n"
+            "非 0 = 发送后再交换该字节数用于接收（如 Flash 读时序）")
         row.addWidget(self.spiRxLen)
+        # 读阶段填充字节：SPI 全双工，要收时钟就必须发数据；读阶段发什么、
+        # 短接回环就收回什么。默认 00 会让回环显示全 0（那是发出的 dummy，
+        # 不是故障），自测回环时改成 FF/AA 更直观。
+        row.addWidget(BodyLabel("读填充", xfer))
+        self.spiDummy = LineEdit(xfer)
+        self.spiDummy.setText("00")
+        self.spiDummy.setFixedWidth(52)
+        self.spiDummy.setToolTip(
+            "读阶段（超出发送数据的部分）发出的填充字节(HEX)。"
+            "SPI 全双工：要收时钟就必须发数据")
+        row.addWidget(self.spiDummy)
         for text, fn in (("读 & 写", self._spi_write_read),
                          ("批量读", self._spi_bulk_read),
                          ("批量写", self._spi_bulk_write)):
@@ -480,22 +497,40 @@ class Ch347Page(QWidget):
     def _spi_bulk_write(self):
         self._spi_xfer("批量写", rx=0)
 
+    def _spi_dummy_byte(self) -> int:
+        """读阶段填充字节；非法输入回退 0，不因此中断传输。"""
+        text = self.spiDummy.text().strip() or "00"
+        try:
+            return int(text, 16) & 0xFF
+        except ValueError:
+            return 0
+
     def _spi_xfer(self, label, tx=None, rx=None):
         if not self._need_ready(label):
             return
-        params = {"tx_hex": self._spi_tx_bytes() if tx is None else tx,
-                  "rx_len": self.spiRxLen.value() if rx is None else rx}
+        dummy = self._spi_dummy_byte()
+        tx_hex = self._spi_tx_bytes() if tx is None else tx
+        rx_len = self.spiRxLen.value() if rx is None else rx
+        params = {"tx_hex": tx_hex, "rx_len": rx_len, "dummy": dummy}
 
         def done(ok, data):
             if not ok:
                 self._err(f"SPI {label}失败", data)
                 return
-            rx_hex = data.get("rx_hex", "")
-            if rx_hex:
-                self._out(self.spiOut, f"{label} 返回",
-                          {"length": len(rx_hex) // 2, "hex": rx_hex})
+            # 对齐原厂 Demo 的呈现：OutData（发出）+ InData（整块回读）。
+            # CH347 的 SPI 是「一次交换 N 字节」，InData 内含发送阶段的
+            # 回读——短接回环时前段就等于 OutData。
+            out_hex = data.get("tx_len", 0)
+            if tx_hex.strip():
+                self._out(self.spiOut, f"{label} OutData",
+                          {"length": data.get("tx_len", 0),
+                           "hex": tx_hex.replace(" ", "").replace("\n", "")})
+            in_hex = data.get("in_hex") or data.get("rx_hex", "")
+            if in_hex:
+                self._out(self.spiOut, f"{label} InData",
+                          {"length": len(in_hex) // 2, "hex": in_hex})
             else:
-                self._log(self.spiOut, f"{label} 完成（{len(params['tx_hex']) // 3}B 已发送）")
+                self._log(self.spiOut, f"{label} 完成（{out_hex}B 已发送）")
         self._req("spi_xfer", cb=done, params=params)
 
     # ── I2C 子页 ───────────────────────────────────────────────

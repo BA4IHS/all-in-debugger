@@ -28,8 +28,6 @@ class ConnectPanel(QWidget):
     refreshRequested = pyqtSignal()
     openRequested = pyqtSignal(dict)
     closeRequested = pyqtSignal()
-    dtrChanged = pyqtSignal(bool)
-    rtsChanged = pyqtSignal(bool)
     codecChanged = pyqtSignal(str)
     hexDisplayChanged = pyqtSignal(bool)
     timestampChanged = pyqtSignal(bool)
@@ -105,12 +103,9 @@ class ConnectPanel(QWidget):
         self.dtrCheck = CheckBox("DTR", card)
         # 默认不勾选：DTR 拉高会让部分开发板进入复位/保持状态（如 Arduino
         # 类自动复位电路），默认关闭更安全；需要时用户手动勾选。
+        # 电平在“打开串口的那一刻”随配置一并生效（见 serial_worker）。
         self.dtrCheck.setChecked(False)
         self.rtsCheck = CheckBox("RTS", card)
-        self.dtrCheck.stateChanged.connect(
-            lambda s: self.dtrChanged.emit(self.dtrCheck.isChecked()))
-        self.rtsCheck.stateChanged.connect(
-            lambda s: self.rtsChanged.emit(self.rtsCheck.isChecked()))
         sigRow.addWidget(self.dtrCheck)
         sigRow.addWidget(self.rtsCheck)
         form.addRow(BodyLabel("信号", card), sigRow)

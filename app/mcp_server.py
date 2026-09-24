@@ -437,7 +437,12 @@ def build_mcp(bridge, allow_exec: bool = False, allow_file: bool = False,
         @tool()
         @_guard
         async def ssh_exec(command: str, timeout: float = 15.0) -> dict:
-            """在已连接的 SSH 会话上执行命令，返回 exit/stdout/stderr。"""
+            """在已连接的 SSH 会话上执行命令，返回 exit/stdout/stderr。
+
+            timeout 为整体截止时间（秒），超时后通道被强制关闭并报错；
+            命令在独立线程执行，期间 ssh_status 等其它工具仍可用
+            （ssh_status 的 exec_running 字段为在途命令数）。
+            """
             import anyio
             return await anyio.to_thread.run_sync(
                 lambda: bridge.ssh_exec(command, timeout))

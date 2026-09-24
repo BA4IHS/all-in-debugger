@@ -230,6 +230,8 @@ class SshPage(QWidget):
         w.hostKeyMismatch.connect(self._on_host_key_mismatch)
         w.closed.connect(self._on_closed)
         w.rxData.connect(self.terminal.queue_bytes)
+        # agent（MCP）执行的远端命令同步渲染到终端，让用户看见执行了什么
+        w.execEcho.connect(self.terminal.queue_bytes)
         w.errorOccurred.connect(self._on_error)
         self.terminal.sendRequested.connect(
             lambda data: self.sht.sigWrite.emit(data))

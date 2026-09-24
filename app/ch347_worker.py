@@ -141,8 +141,20 @@ class Ch347Worker(QObject):
         rx_len = int(req.get("rx_len", 0))
         if not tx and rx_len <= 0:
             raise ValueError("发送数据与读取长度不能同时为空")
-        rx = d.spi_xfer(tx, rx_len)
-        return {"tx_len": len(tx), "rx_len": len(rx), "rx_hex": rx.hex()}
+        dummy = int(req.get("dummy", 0)) & 0xFF
+        # 一律取完整交换结果：CH347 的 SPI 是「一次交换 N 字节」，缓冲区
+        # 被就地覆写为接收数据。原厂 Demo 显示的 InData 就是这个整块——
+        # 只取尾部（读阶段）会把发送阶段的回读丢掉，导致回环测试看不到
+        # 数据（原厂 OutData(2):AA BB / InData(2):AA BB，我们曾只显示尾部
+        # 的 dummy 00 00）。
+        echo_rx, rx = d.spi_xfer(tx, rx_len, dummy=dummy, echo=True)
+        return {
+            "tx_len": len(tx),
+            "rx_len": len(rx),
+            "rx_hex": rx.hex(),                 # 读阶段（保持既有语义）
+            "in_hex": (echo_rx + rx).hex(),     # 完整 InData（对齐原厂）
+            "dummy": dummy,
+        }
 
     # ── I2C ─────────────────────────────────────────────────────
 

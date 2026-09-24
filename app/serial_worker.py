@@ -49,7 +49,16 @@ class SerialWorker(QObject):
             return
         cfg = dict(cfg)
         port = str(cfg.pop("port", ""))
-        # dtr/rts 不是构造函数参数（pyserial 3.5），只能打开后经属性设置
+        # dtr/rts 不是 pyserial 构造参数（传进 **kwargs 会抛
+        # ValueError: unexpected keyword arguments），但它们必须在
+        # “打开的那一刻”就生效，不能打开后再补设——补设会先以默认电平
+        # 打开端口，对 DTR 接复位电路的板子（如 Arduino）等于多了一次
+        # 电平跳变，可能把目标板复位掉。
+        #
+        # pyserial 的 dtr/rts 属性 setter 在**未打开**时只记录状态、
+        # 不碰硬件，而 open() 内部的 _reconfigure_port() 会读这两个状态
+        # 直接配置 DCB（DTR_CONTROL_ENABLE/DISABLE）。因此正确顺序是：
+        # 先构造（不自动打开）→ 设属性 → open()，一次打开即完成配置。
         dtr = cfg.pop("dtr", None)
         rts = cfg.pop("rts", None)
         # 防御性兜底：write_timeout 缺省（pyserial 默认 None）意味着
@@ -60,16 +69,29 @@ class SerialWorker(QObject):
             cfg["write_timeout"] = 1
         if cfg.get("timeout") is None:
             cfg["timeout"] = 0.05
+        # 显式关闭 DSR/DTR 硬件流控：它是发送闸门，对端 DSR 不就绪会把
+        # 写入卡到超时甚至永久阻塞。本工具的流控只经 xonxoff/rtscts。
+        cfg["dsrdtr"] = False
         ser = None
         try:
             if "://" in port:
-                ser = serial.serial_for_url(port, **cfg)
+                # 带协议的 URL（如 loop://）：serial_for_url 支持 do_not_open，
+                # 用它拿到未打开的实例，以便先设电平再 open
+                ser = serial.serial_for_url(port, do_not_open=True, **cfg)
             else:
-                ser = serial.Serial(port=port, **cfg)
+                # 实体串口：Serial.__init__ 不接受 do_not_open（会抛
+                # ValueError），故先以 port=None 构造（不打开），
+                # 设好电平后再补上 port 并 open()
+                ser = serial.Serial(**cfg)
+            # 打开前设电平：未打开时 setter 只记状态，open() 内部会依此
+            # 配置 DCB（DTR_CONTROL_ENABLE/DISABLE），一次打开即完成
             if dtr is not None:
                 ser.dtr = bool(dtr)
             if rts is not None:
                 ser.rts = bool(rts)
+            if "://" not in port:
+                ser.port = port
+            ser.open()
         except Exception as e:
             if ser is not None:
                 try:
@@ -125,22 +147,6 @@ class SerialWorker(QObject):
         except Exception as e:
             log.warning("串口发送失败：%s", e)
             self.errorOccurred.emit(f"发送失败：{e}")
-
-    @pyqtSlot(bool)
-    def setDTR(self, on: bool):
-        try:
-            if self._ser is not None:
-                self._ser.dtr = bool(on)
-        except Exception as e:
-            self.errorOccurred.emit(f"设置 DTR 失败：{e}")
-
-    @pyqtSlot(bool)
-    def setRTS(self, on: bool):
-        try:
-            if self._ser is not None:
-                self._ser.rts = bool(on)
-        except Exception as e:
-            self.errorOccurred.emit(f"设置 RTS 失败：{e}")
 
     @pyqtSlot(str)
     def setLogFile(self, path: str):
@@ -302,8 +308,6 @@ class SerialThread(QObject):
     sigOpen = pyqtSignal(dict)
     sigClose = pyqtSignal()
     sigWrite = pyqtSignal(bytes)
-    sigSetDTR = pyqtSignal(bool)
-    sigSetRTS = pyqtSignal(bool)
     sigSetLogFile = pyqtSignal(str)
     sigMcpQuery = pyqtSignal(dict)      # MCP 只读查询请求
 
@@ -317,8 +321,6 @@ class SerialThread(QObject):
         self.sigOpen.connect(self.worker.requestOpen, queued)
         self.sigClose.connect(self.worker.requestClose, queued)
         self.sigWrite.connect(self.worker.requestWrite, queued)
-        self.sigSetDTR.connect(self.worker.setDTR, queued)
-        self.sigSetRTS.connect(self.worker.setRTS, queued)
         self.sigSetLogFile.connect(self.worker.setLogFile, queued)
         self.sigMcpQuery.connect(self.worker.requestMcpQuery, queued)
 

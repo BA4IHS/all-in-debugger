@@ -93,8 +93,6 @@ class ConsolePage(QWidget):
         cp.refreshRequested.connect(self.refreshPorts)
         cp.openRequested.connect(st.sigOpen.emit)
         cp.closeRequested.connect(st.sigClose.emit)
-        cp.dtrChanged.connect(st.sigSetDTR.emit)
-        cp.rtsChanged.connect(st.sigSetRTS.emit)
         cp.codecChanged.connect(rp.setCodec)
         cp.codecChanged.connect(sp.setCodec)
         cp.hexDisplayChanged.connect(rp.setHexDisplay)

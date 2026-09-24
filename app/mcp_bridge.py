@@ -465,10 +465,12 @@ class WorkerBridge(QObject):
 
     def ssh_exec(self, command: str, timeout: float = 15.0):
         self._ssh_required()
+        # worker 侧以 timeout 为整体截止（超时即关通道报错），这里多留
+        # 10s 覆盖线程启动/读线程回收余量，避免结果晚几毫秒就被丢弃
         return self._query(
             self.sht, {"op": "exec", "cmd": str(command),
                        "timeout": float(timeout)},
-            timeout=max(20.0, float(timeout) + 5.0))
+            timeout=max(20.0, float(timeout) + 10.0))
 
     def ssh_file_list(self, path: str = "."):
         self._ssh_required()

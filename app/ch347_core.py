@@ -25,7 +25,13 @@ DLL_NAME = "CH347DLL.dll"
 DLL_ENV = "CH347DLL"
 # 驱动安装到系统目录后的候选导出名（按优先级尝试，不随包分发）
 _SYSTEM_DLL_NAMES = (DLL_NAME, "CH347DLLA64.dll")
-MAX_STREAM = 4096          # 单次 SPI/I2C 流最大字节数（mMAX_BUFFER_LENGTH）
+MAX_STREAM = 4092          # 单次 SPI/I2C 流最大字节数
+# 实测边界（CH347T + 官方 CH347DLLA64.dll，逐字节二分）：
+#   4093 → 成功；4094/4095/4096 → 驱动返回 0（失败）
+# 官方头文件的 mMAX_BUFFER_LENGTH=4096 是**缓冲区容量**，真实有效载荷
+# 要扣掉协议开销，故取 4092（4 字节对齐且留一格余量）。
+# 此前直接取 4096 会导致所有 ≥4094 字节的传输整块失败——表现为长数据
+# 读写在最后一块报“SPI 流传输 失败”，短数据却完全正常。
 _INVALID_HANDLES = (None, 0, -1, 0xFFFFFFFF, 0xFFFFFFFFFFFFFFFF)
 
 
@@ -187,6 +193,37 @@ LCD_CMD_MADCTL = 0x36
 LCD_CMD_COLMOD = 0x3A
 
 FLASH_CAP_LIMIT = 32 * 1024 * 1024   # Flash 区域操作/文件上限 32MB
+
+
+# ── 纯函数：芯片模式 → 工具子页 ──────────────────────────────────────
+
+# Ch347Page 工具子页 key（与页面 Pivot 注册及测试断言一致；不含未注册
+# 的 LCD——_build_lcd_tab 存在但未进 pivot，收编属独立需求）
+TOOL_TAB_KEYS = ("spi", "i2c", "i2cdev", "gpio", "flash", "eeprom")
+
+
+def mode_tool_tabs(chip_mode) -> set:
+    """芯片模式 → 本页可用工具子页 key 集合（S1/S2 拨码决定，权威表）：
+
+    - Mode0（OFF/OFF）：UART0+UART1 双串口 → 空集（工具去串口页）
+    - Mode1（ON/OFF） ：UART1+I2C+SPI (VCP) → 全集
+    - Mode2（OFF/ON） ：UART1+I2C+SPI (HID) → 全集
+    - Mode3（ON/ON）  ：UART1+JTAG → 空集（工具去 DAP 页）
+
+    None/缺键/越界/非数值等未知输入 fail-open 返回全集：宁可显示后由
+    DLL 报错，也不误藏可用工具（显隐只管引导，_need_ready 管操作闸门）。
+    返回集合而非 bool，为将来"部分子页可见"留扩展位——当前模式表只有
+    全显/全隐两态。
+    """
+    try:
+        m = int(chip_mode)
+    except (TypeError, ValueError):
+        return set(TOOL_TAB_KEYS)
+    if m in (0, 3):
+        return set()
+    if m in (1, 2):
+        return set(TOOL_TAB_KEYS)
+    return set(TOOL_TAB_KEYS)          # 越界模式同样 fail-open
 
 
 # ── 纯函数：HEX / 地址拆分 / JEDEC ───────────────────────────────────
@@ -688,11 +725,27 @@ def _api() -> _Api:
 
 
 def _buf(data=b"", extra: int = 0):
-    """create_string_buffer 包装：len(data)+extra。"""
-    size = len(bytes(data)) + extra
+    """把字节构造为交给 DLL 的读写缓冲区。
+
+    关键：当传入 bytearray 且 extra==0 时，返回**共享同一块内存**的
+    ctypes 缓冲区（from_buffer），DLL 就地写入的内容能被调用方直接读到。
+
+    此前实现是 create_string_buffer(bytes(data), size)——它拷贝一份，
+    DLL 写的是那份临时拷贝，调用方手里的 bytearray 始终是原始值。
+    结果所有“读回型”调用全部失效：SPI 回环读不到数据、Flash 读回全 0、
+    JEDEC ID/状态寄存器读不到值。DLL 参数是按指针接收缓冲区的，必须
+    让调用方的内存地址能收到回写。
+
+    extra>0 时无法共享（容量超出原字节数），退化为新分配——这类调用
+    （如 CH347SPI_Write）是纯写入，不需要回读。
+    """
+    if extra == 0 and isinstance(data, bytearray):
+        return (ctypes.c_char * len(data)).from_buffer(data)
+    raw = bytes(data)
+    size = len(raw) + extra
     if size == 0:
         size = 1
-    return ctypes.create_string_buffer(bytes(data), size)
+    return ctypes.create_string_buffer(raw, size)
 
 
 def _check(ok, what: str):
@@ -728,7 +781,11 @@ def _infor_to_dict(inf: DEVICE_INFOR) -> dict:
 def scan_devices() -> List[dict]:
     """索引 0~15 逐个试探：Open→GetDeviceInfor→Close。
 
-    过滤 ChipMode==3（Mode3 接口为 JTAG+I2C，无 SPI/GPIO）的设备。
+    全部模式（Mode0~3）一律如实返回，扫描层不做模式过滤：按模式
+    显隐工具子页并给出引导是 UI 层职责（见 mode_tool_tabs）。此前
+    过滤 Mode3 是因为误注释「Mode3=JTAG+I2C」——按拨码权威表
+    Mode3 实为 UART1+JTAG，且过滤会让 Mode3 设备从下拉框与
+    MCP ch347_scan 中消失，「去 DAP 页」引导永远触发不了。
 
     已被本进程 Ch347Device 占用的索引会被跳过：对同一句柄重复
     Open/Close 会破坏 CH347 驱动内部状态（底层为内核态驱动，
@@ -748,8 +805,6 @@ def scan_devices() -> List[dict]:
             # 也便于测试注入 fake api
             if api.CH347GetDeviceInfor(i, inf):
                 d = _infor_to_dict(inf)
-                if d["chip_mode"] == 3:
-                    continue
                 d["chip_type"] = int(api.CH347GetChipType(i))
                 d["chip_type_name"] = CHIP_TYPE_NAMES.get(
                     d["chip_type"], f"0x{d['chip_type']:02X}")
@@ -845,16 +900,26 @@ class Ch347Device:
         _check(self._api.CH347SPI_Init(self.index, ctypes.byref(cfg)),
                "SPI 初始化")
 
-    def spi_xfer(self, tx, read_len: int = 0) -> bytes:
-        """全双工流：发送 tx，总交换长度 len(tx)+read_len，返回尾部 read_len。
+    def spi_xfer(self, tx, read_len: int = 0, dummy: int = 0x00,
+                 echo: bool = False):
+        """全双工流：发送 tx，总交换长度 len(tx)+read_len。
 
-        超过 4096 字节自动分块（CS 保持由 Init 的 auto_deactive 决定）。
+        dummy：读阶段发出的填充字节。SPI 是全双工——要收时钟就必须发
+        数据，读阶段发什么、短接回环就收回什么。默认 0x00，故回环测试
+        会读回全 0（那是"发出的 dummy"，不是故障）。自测回环时把它设成
+        0xFF/0xAA 之类，读回同值即证明链路通畅。
+
+        echo=True 时返回 (发送阶段回读, 读阶段数据)：
+        发送阶段本身也在收数据（短接回环即 tx 本身），单独取出可用于
+        回环自测；默认只返回读阶段数据，保持原有语义。
+
+        超过单次上限自动分块（CS 保持由 Init 的 auto_deactive 决定）。
         """
         tx = bytes(tx or b"")
         total = len(tx) + int(read_len)
         if total <= 0:
-            return b""
-        out = bytearray()
+            return (b"", b"") if echo else b""
+        swap = bytearray()          # 完整交换结果（发送回读 + 读阶段）
         pos = 0
         remain_total = total
         while remain_total > 0:
@@ -863,15 +928,19 @@ class Ch347Device:
             # 段内对应要发送的部分
             take = min(n, max(0, len(tx) - pos))
             buf[:take] = tx[pos:pos + take]
+            # 读阶段（本段内超出 tx 的部分）填 dummy
+            if take < n:
+                buf[take:] = bytes([dummy & 0xFF]) * (n - take)
             _check(self._api.CH347StreamSPI4(self.index, self._cs, n,
                                              _buf(buf)),
                    "SPI 流传输")
-            out += buf
+            swap += buf
             pos += take
             remain_total -= n
-        if read_len:
-            return bytes(out[len(tx):len(tx) + int(read_len)])
-        return b""
+        rx = bytes(swap[len(tx):len(tx) + int(read_len)]) if read_len else b""
+        if echo:
+            return bytes(swap[:len(tx)]), rx
+        return rx
 
     # ── I2C ──────────────────────────────────────────────────────
 

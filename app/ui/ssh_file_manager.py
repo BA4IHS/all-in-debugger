@@ -9,7 +9,7 @@ from __future__ import annotations
 import posixpath
 
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QKeyEvent
+from PyQt6.QtGui import QColor, QKeyEvent, QPalette
 from PyQt6.QtWidgets import (
     QAbstractItemView, QFileDialog, QFileIconProvider, QHBoxLayout,
     QHeaderView, QInputDialog, QTableWidgetItem, QVBoxLayout, QWidget,
@@ -18,7 +18,7 @@ from PyQt6.QtWidgets import (
 from qfluentwidgets import (
     Action, BodyLabel, CaptionLabel, CardWidget, FluentIcon, IndeterminateProgressBar,
     InfoBar, LineEdit, MessageBox, PrimaryDropDownPushButton, PushButton,
-    RoundMenu, TableWidget, ToolButton,
+    RoundMenu, TableWidget, ToolButton, isDarkTheme,
 )
 
 from app.ui.window_utils import center_window
@@ -66,6 +66,7 @@ class SftpFileManagerWindow(QWidget):
         self._busy = False           # 是否有文件操作在途
         self._icon_provider = QFileIconProvider()
 
+        self._apply_window_palette()
         self._build_ui()
         center_window(self)
 
@@ -85,6 +86,19 @@ class SftpFileManagerWindow(QWidget):
             self._set_conn_state(False, "未连接，等待 SSH 连接…")
 
     # ── UI ─────────────────────────────────────────────────────
+
+    def _apply_window_palette(self):
+        """顶层 QWidget 不受全局主题背景约束，需手动铺底色。
+
+        与 AdbFileManagerWindow / PhoenixWindow 保持一致：深色
+        rgb(32,39,46)、浅色 rgb(245,247,250)，否则深色模式下整窗白底。
+        """
+        palette = self.palette()
+        palette.setColor(
+            QPalette.ColorRole.Window,
+            QColor(32, 39, 46) if isDarkTheme() else QColor(245, 247, 250))
+        self.setPalette(palette)
+        self.setAutoFillBackground(True)
 
     def _build_ui(self):
         root = QVBoxLayout(self)
