@@ -24,8 +24,10 @@ from app.logging_setup import setLogLevel
 from qfluentwidgets.common.smooth_scroll import SmoothMode
 
 # 关于信息
+from app.version import VERSION   # 版本号单一来源（build.py 打包同源）
+
 APP_NAME = "all-in-debugger"
-APP_VERSION = "v1.3"
+APP_VERSION = f"v{VERSION}"
 APP_AUTHOR = "hongshi"
 PROJECT_URL = "https://github.com/BA4IHS/all-in-debugger"
 AUTHOR_URL = "https://github.com/BA4IHS"

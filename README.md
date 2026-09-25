@@ -134,7 +134,7 @@ build.bat --no-archive    :: 只编译，不压缩
 产物说明：
 
 - `dist/main.dist/` — 免 Python 运行目录，直接双击 `all-in-debugger.exe`
-- `dist/all-in-debugger-x64-1.3.0.7z` — 发布归档（机器无 7-Zip 时自动回退 `.zip`）
+- `dist/all-in-debugger-x64-1.4.0.7z` — 发布归档（机器无 7-Zip 时自动回退 `.zip`）
 
 打包注意事项：
 
@@ -197,6 +197,7 @@ all-in-debugger/
 内嵌 streamable HTTP MCP 服务（FastMCP + uvicorn），向 AI 客户端暴露 **68 个调试工具**：
 
 - 仅监听 `127.0.0.1`，Bearer Token 鉴权，默认关闭，设置页可开关
+- 启动时校验 MCP 端口占用：被占用（常见于重复启动实例）时弹提示并拒绝启动，不静默失败
 - 覆盖串口 / HID / DAP-RTT / Modbus / SSH / ADB / TCP-IP / CH347 的状态查询、连接、收发、读写寄存器、文件传输
 - 首次启动自动生成密钥（绝不覆盖），设置页一键复制 AI 客户端接入配置
 

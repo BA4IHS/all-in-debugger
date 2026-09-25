@@ -43,8 +43,10 @@ except (AttributeError, ValueError):
     pass  # 旧版 Python 无 reconfigure，忽略
 
 ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT))
+from app.version import VERSION   # 版本号单一来源（设置页显示/归档名同源）
+
 ENTRY = ROOT / "main.py"
-VERSION = "1.4.0"
 
 # 输出目录名 = 入口模块名 + ".dist"（与既有 dist/main.dist 结构一致）
 DIST_DIR = ROOT / "dist"

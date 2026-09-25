@@ -8,8 +8,8 @@ from PyQt6.QtCore import QTimer, Qt, pyqtSignal
 from PyQt6.QtGui import QCloseEvent, QColor
 
 from qfluentwidgets import (
-    FluentIcon, FluentIconBase, NavigationItemPosition, SplitFluentWindow,
-    Theme, getIconColor, isDarkTheme,
+    FluentIcon, FluentIconBase, InfoBar, NavigationItemPosition,
+    SplitFluentWindow, Theme, getIconColor, isDarkTheme,
 )
 
 from app.config import cfg, qconfig
@@ -408,10 +408,20 @@ class MainWindow(SplitFluentWindow):
                 allow_file=qconfig.get(cfg.mcpAllowFile),
                 allow_ch347=qconfig.get(cfg.mcpCh347))
             if not self._mcpService.start():
-                # 无密钥等情况：服务未启动，只记录原因，GUI 照常运行
+                # 无密钥/端口被占用等：服务未启动，弹提示 + 记录原因，
+                # GUI 照常运行
                 log.warning("MCP 服务未启动：%s", self._mcpService.last_error)
+                InfoBar.warning(
+                    title="MCP 服务未启动",
+                    content=str(self._mcpService.last_error),
+                    duration=8000, parent=self)
             else:
                 log.info("MCP 服务已启动：%s", self._mcpService.url)
+                InfoBar.success(
+                    title="MCP 服务已启动",
+                    content=f"端口 {self._mcpService.port} 未被占用，"
+                            f"监听 {self._mcpService.url}",
+                    duration=3000, parent=self)
         except Exception:
             log.exception("MCP 服务初始化失败")
             self._mcpService = None

@@ -149,7 +149,7 @@ class SshPage(QWidget):
         self.statusLabel.setWordWrap(True)
         v.addWidget(self.statusLabel)
 
-        # 主机密钥指纹：连接后显示，供用户与服务器端 ssh-keygen -lf 核对
+        # 主机密钥：连接后只显示密钥类型（指纹会撑宽左栏，见 _show_host_key）
         self.hostKeyLabel = CaptionLabel("", card)
         self.hostKeyLabel.setWordWrap(True)
         v.addWidget(self.hostKeyLabel)
@@ -293,14 +293,19 @@ class SshPage(QWidget):
         self._sftpPath = "."
 
     def _show_host_key(self, hk):
-        """显示主机密钥指纹；首次记录/用户确认更新时提醒核对。"""
+        """连接后提示主机密钥；首次记录/用户确认更新时提醒核对。
+
+        左栏只显示密钥类型、不显示指纹：指纹是无断行点的长串，会撑爆
+        内容最小宽度把整列拓宽/裁切。指纹仍在首次连接提醒与密钥变更
+        弹框中展示（TOFU 线下核对与防中间人必需）。
+        """
         hk = hk or {}
         fp = str(hk.get("fingerprint") or "")
         if not fp:
             self.hostKeyLabel.setText("")
             return
         self.hostKeyLabel.setText(
-            f"主机密钥 {hk.get('key_type') or ''} {fp}")
+            f"主机密钥 {hk.get('key_type') or ''}")
         status = str(hk.get("status") or "")
         if status == "new":
             InfoBar.warning(

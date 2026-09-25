@@ -740,6 +740,22 @@ class _TokenMiddleware:
         await self.app(scope, receive, send)
 
 
+def port_in_use(host: str, port: int) -> bool:
+    """端口占用探测：尝试 bind，失败即被占。
+
+    启动前预检一次，把 uvicorn 的 [Errno 10048] 翻译成人话提示；
+    纯函数便于单测。探测与实际监听之间存在极小竞争窗口，属可接受。
+    """
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        try:
+            s.bind((str(host), int(port)))
+            return False
+        except OSError:
+            return True
+
+
 class McpService:
     """内嵌 MCP 服务的启停封装（独立线程跑 uvicorn）。"""
 
@@ -784,6 +800,14 @@ class McpService:
             self._error = RuntimeError(
                 "未配置 Bearer 密钥，MCP 服务未启动"
                 "（设置 → MCP 服务 中生成密钥后重启）")
+            log.warning("MCP 服务拒绝启动：%s", self._error)
+            return ""
+        # 启动前端口校验：被占用（常见为重复启动实例）时给人话提示并
+        # 拒绝启动，否则只剩 uvicorn 的 [Errno 10048] 难以理解
+        if port_in_use("127.0.0.1", self.port):
+            self._error = RuntimeError(
+                f"端口 {self.port} 已被占用（可能已有一个实例在运行，"
+                "或被其它程序占用），MCP 服务未启动")
             log.warning("MCP 服务拒绝启动：%s", self._error)
             return ""
         if self.running:

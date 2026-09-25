@@ -16,6 +16,11 @@ from app.native import hexPreview
 
 # MCP 只读查询用的 RX 环形缓冲上限（不影响 UI 接收链路）
 RX_CAP = 65536
+# 接收并批上报：单批字节上限 / 上报时间窗。设备输出过快时每读一块就
+# emit 一条 queued 信号，GUI 消费不及会让事件队列无界堆积把内存吃穿
+# （用户表现为“串口输入过快就崩溃”），并批后事件率有硬上限。
+EMIT_BATCH_BYTES = 4096
+EMIT_FLUSH_SECS = 0.03
 log = logging.getLogger(__name__)
 
 
@@ -38,6 +43,8 @@ class SerialWorker(QObject):
         self._logFp = None
         self._logPath = ""
         self._rxBuf = bytearray()
+        self._emitBuf = bytearray()   # 待并批上报的接收数据（_flushRx）
+        self._emitAt = 0.0            # 上次 dataReceived 上报时刻
 
     # ── UI → worker（全部在 worker 线程执行）──────────────────────
 
@@ -105,6 +112,7 @@ class SerialWorker(QObject):
         self._ser = ser
         self._portName = port
         self._rxBuf.clear()
+        self._emitBuf.clear()
         # 详细参数：波特率/数据位/校验/停止位/流控（排查现场接线与配置）
         try:
             log.info(
@@ -238,7 +246,16 @@ class SerialWorker(QObject):
                 if log.isEnabledFor(logging.DEBUG):
                     log.debug("串口 RX %s %d 字节：%s", self._portName,
                               len(data), hexPreview(data))
-                self.dataReceived.emit(bytes(data), time.time())
+                self._emitBuf += data
+                # 并批上报（限事件率，防 UI 端 queued 事件堆积）：
+                # 后续暂无数据立即交付（交互零延迟）；仍在洪流中按批交付
+                try:
+                    more = bool(ser.in_waiting)
+                except Exception:     # noqa: BLE001 - 端口被关按无后续处理
+                    more = False
+                self._flushRx(force=not more)
+            else:
+                self._flushRx(force=True)   # 读空也交付尾巴，延迟有上限
         # 收尾：确保端口与日志关闭
         self._closePort(notify=True)
         if self._logFp is not None:
@@ -251,7 +268,26 @@ class SerialWorker(QObject):
 
     # ── 内部 ────────────────────────────────────────────────────
 
+    def _flushRx(self, force: bool = False):
+        """按批上报接收数据，限事件率防 UI 端 queued 事件堆积。
+
+        设备输出过快时每读一块就 emit 一条 queued 信号，GUI 消费不及会
+        令事件队列无限膨胀（用户表现为“串口输入过快就崩溃”）。并批规则：
+        攒满 EMIT_BATCH_BYTES 或距上次上报 ≥ EMIT_FLUSH_SECS 即交付；
+        force=True（读空/关闭端口）立即交付，交互数据零延迟。
+        """
+        if not self._emitBuf:
+            return
+        if not force and len(self._emitBuf) < EMIT_BATCH_BYTES \
+                and time.monotonic() - self._emitAt < EMIT_FLUSH_SECS:
+            return
+        self.dataReceived.emit(bytes(self._emitBuf), time.time())
+        self._emitBuf.clear()
+        self._emitAt = time.monotonic()
+
     def _closePort(self, notify: bool):
+        # 关口前把攒批尾巴交付 UI，避免最后一段数据滞留在批里丢失
+        self._flushRx(force=True)
         ser, self._ser = self._ser, None
         if ser is not None:
             log.info("串口已关闭：%s", getattr(ser, "name", "?"))

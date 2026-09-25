@@ -191,6 +191,21 @@ def _join_text(chunks: list) -> str:
     return b"".join(chunks).decode("utf-8", "replace")[:EXEC_TEXT_CAP]
 
 
+def _ensure_crlf(data: bytes) -> bytes:
+    """把裸 LF 补成 CRLF，供终端回显对齐（已有 CRLF 不重复补）。
+
+    换行对齐靠 PTY 的 ONLCR 把 LF 翻译成 CRLF；exec 通道无 PTY，远端
+    只发裸 LF，直接注入终端仿真会只下移不回行首，输出一行比一行偏。
+    按块处理：块边界偶发 \\r\\r\\n 无害（连续两次回行首等价）。
+    """
+    out = bytearray()
+    for b in data:
+        if b == 0x0A and (not out or out[-1] != 0x0D):
+            out.append(0x0D)
+        out.append(b)
+    return bytes(out)
+
+
 class SshWorker(QObject):
     # ── worker → UI ────────────────────────────────────────────
     connected = pyqtSignal(dict)        # {host, port, username[, host_key]}
@@ -490,9 +505,12 @@ class SshWorker(QObject):
         return {"exit": exit_code, "stdout": stdout, "stderr": stderr}
 
     def _echo_line(self, text: str, color: str = "33"):
-        """向终端注入一行彩色回显（\r\n 开头，避开当前 shell 提示行）。"""
-        self.execEcho.emit(
-            f"\r\n\x1b[{color}m{text}\x1b[0m\r\n".encode("utf-8"))
+        """向终端注入一行彩色回显（\r\n 开头，避开当前 shell 提示行）。
+
+        text 内的裸 LF 一并补 CR（失败详情含远端输出尾部时是多行文本）。
+        """
+        self.execEcho.emit(_ensure_crlf(
+            f"\r\n\x1b[{color}m{text}\x1b[0m\r\n".encode("utf-8")))
 
     def _start_exec(self, cmd: str, timeout: float, on_done,
                     echo: bool = False) -> None:
@@ -509,16 +527,16 @@ class SshWorker(QObject):
         执行什么，用户在窗口里看得见。SFTP 删除目录等 UI 自身发起的
         内部命令不回显（已有状态栏提示，避免刷屏）。
         """
+        on_chunk = None
         if echo:
             self._echo_line(f"[AI] $ {cmd}")
+            on_chunk = lambda data: self.execEcho.emit(_ensure_crlf(data))
         with self._exec_lock:
             self._exec_running += 1
 
         def run():
             try:
-                res = self._do_exec(
-                    cmd, timeout,
-                    on_chunk=self.execEcho.emit if echo else None)
+                res = self._do_exec(cmd, timeout, on_chunk=on_chunk)
             except Exception as e:  # noqa: BLE001 - 兜底，防线程静默消失
                 res = {"error": f"命令执行失败：{e}"}
             with self._exec_lock:

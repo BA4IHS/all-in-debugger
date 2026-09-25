@@ -32,6 +32,7 @@ from app.ui.find_bar import FindBar
 _PAD = 8
 _RADIUS = 8
 _QUEUED_FEED_CHUNK = 2048       # 单次解析控制在约一帧内，避免 ADB 大输出阻塞输入
+_QUEUED_FEED_CAP = 512 * 1024   # 喂入队列上限：显示跟不上输入时丢最旧，防内存膨胀
 
 # ---------------------------------------------------------------------------
 # 调色板（VSCode 风格 16 色 + pyte typo 兼容）
@@ -270,6 +271,12 @@ class QTerminalWidget(QWidget):
         chunk = bytes(data)
         self._feed_queue.append(chunk)
         self._queued_bytes += len(chunk)
+        # 队列过长（输出远快于解析）时丢最旧，与回滚窗口截断语义一致；
+        # 无上限时内存会被洪流吃穿（“输入过快就崩溃”）
+        while self._queued_bytes > _QUEUED_FEED_CAP and self._feed_queue:
+            head = self._feed_queue.popleft()
+            self._queued_bytes -= max(0, len(head) - self._feed_head_offset)
+            self._feed_head_offset = 0
         if not self._feed_timer.isActive():
             self._feed_timer.start(0)
 

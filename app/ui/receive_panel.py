@@ -29,6 +29,9 @@ class ReceiveController:
     """日志视图的批量渲染控制器（只渲染，不计数）。"""
 
     FLUSH_MS = 33
+    # 未渲染缓冲上限：渲染跟不上输入时丢最旧（同 _truncate 滑窗语义），
+    # 防 pending 无界膨胀把内存吃穿（“输入过快就崩溃”）
+    PENDING_CAP = 512 * 1024
 
     def __init__(self, view: PlainTextEdit):
         self._view = view
@@ -56,6 +59,20 @@ class ReceiveController:
             self._pending[-1][1] += data
         else:
             self._pending.append([source, bytearray(data)])
+        self._trim_pending()
+
+    def _trim_pending(self):
+        """把未渲染总量压回 PENDING_CAP：从最旧数据开始丢。"""
+        total = sum(len(raw) for _, raw in self._pending)
+        while total > self.PENDING_CAP and self._pending:
+            head = self._pending[0]
+            overflow = total - self.PENDING_CAP
+            if len(head[1]) <= overflow:
+                total -= len(head[1])
+                self._pending.pop(0)
+            else:
+                del head[1][:overflow]
+                total -= overflow
 
     def setHexDisplay(self, on: bool):
         self._hexDisplay = bool(on)
@@ -107,6 +124,9 @@ class ReceiveController:
         if not parts:
             return
         text = "\n".join(parts)
+        if len(text) > self._maxChars:
+            # 单次插入巨文本会把 QTextDocument 布局拖死，先裁到窗口上限
+            text = text[-self._maxChars:]
 
         # 未开启自动跟随时保存当前位置。QPlainTextEdit 在光标原本位于
         # 底部时会因 appendPlainText 自动跳到新底部，需要显式恢复。
@@ -242,7 +262,9 @@ class ReceivePanel(QWidget):
         self._ctrl.feed(data, ts, source)
 
     def feed_term(self, data: bytes):
-        self.terminal.feed_bytes(data)
+        # 走异步分片队列而非同步 feed_bytes：高速输入时 pyte 解析阻塞
+        # GUI 会让 queued 事件堆积（越跑越卡最终崩溃），队列自身有上限
+        self.terminal.queue_bytes(data)
 
     def bumpRx(self, n: int):
         self._rx += n
