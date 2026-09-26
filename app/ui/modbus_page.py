@@ -279,6 +279,7 @@ class ModbusPage(QWidget):
 
         self._connect_signals()
         self._on_transport_changed(self.transportCombo.currentText())
+        self.refreshPorts()          # 端口下拉初始填充（与串口页一致）
         for cfg in DEFAULT_ROWS:
             self._add_row(dict(cfg))
 
@@ -303,10 +304,18 @@ class ModbusPage(QWidget):
         r.addWidget(self.transportCombo, 1)
         v.addLayout(r)
 
-        # RTU 参数
-        self.portEdit = LineEdit(card)
-        self.portEdit.setPlaceholderText("COM 口，如 COM5")
-        v.addWidget(self.portEdit)
+        # RTU 参数：端口下拉（与串口页一致：下拉选择 + 刷新按钮）
+        portRow = QHBoxLayout()
+        self.portLabel = BodyLabel("端口", card)
+        self.portCombo = ComboBox(card)
+        self.portCombo.setPlaceholderText("COM 口，如 COM5")
+        self.portRefreshBtn = ToolButton(FluentIcon.UPDATE, card)
+        self.portRefreshBtn.setToolTip("刷新端口列表")
+        self.portRefreshBtn.clicked.connect(lambda _=False: self.refreshPorts())
+        portRow.addWidget(self.portLabel)
+        portRow.addWidget(self.portCombo, 1)
+        portRow.addWidget(self.portRefreshBtn)
+        v.addLayout(portRow)
         br = QHBoxLayout()
         br.addWidget(BodyLabel("波特率", card))
         self.baudCombo = ComboBox(card)
@@ -460,9 +469,22 @@ class ModbusPage(QWidget):
 
     # ── 连接 ───────────────────────────────────────────────────
 
+    def refreshPorts(self):
+        """刷新端口下拉（与串口页一致：标签「COMx — 描述」，userData 存真实端口）。"""
+        current = self.portCombo.currentData()
+        self.portCombo.blockSignals(True)
+        self.portCombo.clear()
+        for d, desc in su.list_serial_ports():
+            self.portCombo.addItem(su.format_port_label(d, desc), userData=d)
+        idx = self.portCombo.findData(current) if current else -1
+        if idx >= 0:
+            self.portCombo.setCurrentIndex(idx)
+        self.portCombo.blockSignals(False)
+
     def _on_transport_changed(self, text: str):
         is_rtu = "RTU" in text
-        self.portEdit.setVisible(is_rtu)
+        for w in (self.portLabel, self.portCombo, self.portRefreshBtn):
+            w.setVisible(is_rtu)
         self.baudCombo.setVisible(is_rtu)
         self.parityCombo.setVisible(is_rtu)
         self.stopCombo.setVisible(is_rtu)
@@ -475,7 +497,7 @@ class ModbusPage(QWidget):
             self.parityCombo.currentText()]
         cfg = {
             "transport": "rtu" if is_rtu else "tcp",
-            "port": self.portEdit.text().strip(),
+            "port": (self.portCombo.currentData() or "").strip(),
             "baudrate": int(self.baudCombo.currentText() or 9600),
             "parity": parity,
             "stopbits": float(self.stopCombo.currentText()),
@@ -483,7 +505,7 @@ class ModbusPage(QWidget):
             "tcp_port": self.tcpPortBox.value(),
         }
         if is_rtu and not cfg["port"]:
-            InfoBar.warning(title="缺少串口", content="请填写 COM 口",
+            InfoBar.warning(title="缺少串口", content="请选择 COM 口",
                             duration=4000, parent=self)
             return
         self.connectBtn.setEnabled(False)
