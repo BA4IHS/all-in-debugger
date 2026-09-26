@@ -12,6 +12,11 @@
 <br />
 
 <p align="center">
+  <img src="app/assets/logo.png" alt="all-in-debugger logo" width="220" />
+</p>
+<br />
+
+<p align="center">
   <h3 align="center">all-in-debugger</h3>
   <p align="center">
     一个窗口搞定所有调试协议，告别满桌调试工具！

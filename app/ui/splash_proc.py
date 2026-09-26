@@ -118,6 +118,11 @@ def main(argv=None):
     QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
     app = QApplication(argv)
+    # 任务栏图标与主程序 LOGO 一致（独立进程，需单独设置）
+    from pathlib import Path
+    from PyQt6.QtGui import QIcon
+    app.setWindowIcon(QIcon(str(
+        Path(__file__).resolve().parent.parent / "assets" / "logo.png")))
     win = SpinWindow(pid)
     win.show()
     app.exec()

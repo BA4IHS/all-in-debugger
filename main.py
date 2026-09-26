@@ -15,9 +15,10 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import QApplication
 
-from qfluentwidgets import FluentIcon, setTheme
+from qfluentwidgets import setTheme
 
 from app.config import cfg, loadConfig, qconfig
 from app.crash_guard import installCrashGuard
@@ -28,6 +29,9 @@ from app.ui.scrollbar_style import apply_white_scrollbars, install_white_scrollb
 from app.ui.window_utils import center_window
 
 CREATE_NO_WINDOW = 0x08000000
+
+# 窗口/任务栏/启动动画/打包 exe 的统一 LOGO（PNG 供界面，logo.ico 供 exe 壳）
+LOGO_PATH = ROOT / "app" / "assets" / "logo.png"
 
 # 打包检测：Nuitka 不设置 sys.frozen（PyInstaller 才设），它在每个编译模块的
 # globals 里注入 __compiled__ 标记；两者任一命中即视为打包运行。
@@ -106,9 +110,20 @@ def main():
         splash_proc.main()
         return
 
+    if sys.platform == "win32":
+        # 独立任务栏标识（须在建窗口前）：不设时 Windows 按 python.exe 归组，
+        # 任务栏按钮显示 python.exe/图标缓存的图标而非窗口 LOGO
+        try:
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+                "BA4IHS.all-in-debugger")
+        except Exception:     # noqa: BLE001 - 只影响任务栏图标，不影响功能
+            pass
     QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
     app = QApplication(sys.argv)
+    # 全部窗口/对话框/任务栏统一 LOGO（打包 exe 图标同源，见 build.py）
+    app.setWindowIcon(QIcon(str(LOGO_PATH)))
     tQt = time.monotonic()
     loadConfig()
     # 日志等级跟随配置：setupLogging 先以默认 INFO 挂 handler，
@@ -154,7 +169,7 @@ def main():
         window.startLazyBuild()
     else:
         # 打包版：主窗口内嵌遮罩盖住分批构造过程，就绪后自动撤除
-        splash = LoadingSplash(FluentIcon.DEVELOPER_TOOLS, window)
+        splash = LoadingSplash(QIcon(str(LOGO_PATH)), window)
         splash.setStatus(
             f"正在加载模块 (0/{len(MainWindow._LAZY_BATCHES) + 1})…")
         window.lazyProgress.connect(

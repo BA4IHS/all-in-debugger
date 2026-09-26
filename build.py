@@ -95,6 +95,8 @@ def build_args() -> list:
         "--nofollow-import-to=numpy,scipy,PIL,colorthief",
         # ---- Windows 形态与版本信息 ----
         "--windows-console-mode=disable",   # GUI 程序，不弹控制台（编译后另有 PE 子系统校验）
+        # exe 壳图标（资源管理器/任务栏）：由 app/assets/logo.png 生成的多尺寸 ICO
+        "--windows-icon-from-ico=app/assets/logo.ico",
         # 启动即申请管理员权限：安装在 Program Files 下必须提权，否则
         # config.json/data.json/logs 都写不进去（程序目录只读）。
         # 清单方式由系统在进程创建前弹 UAC，比运行期 ShellExecuteW
@@ -392,6 +394,21 @@ def check_lazy_modules():
     return True
 
 
+def check_build_assets():
+    """编译前校验品牌资源：logo.ico 缺失时 Nuitka 要到编译尾声才报错，
+    30 分钟白跑；这里开跑前即拦下。"""
+    missing = [p.name for p in (ROOT / "app" / "assets" / "logo.ico",
+                                ROOT / "app" / "assets" / "logo.png")
+               if not p.is_file()]
+    if missing:
+        print(f"[build] 错误：缺少品牌资源 {', '.join(missing)}"
+              "（logo.png 供界面，logo.ico 供 exe 壳图标），已中止",
+              file=sys.stderr)
+        return False
+    print("[build] 品牌资源检查：logo.png / logo.ico 就绪 ✓")
+    return True
+
+
 def main():
     argv = sys.argv[1:]
 
@@ -403,6 +420,9 @@ def main():
               "→ 商业工具剔除与自检")
         print(f"[build] 归档目标：{ARCHIVE_BASE}.7z / .zip")
         return
+
+    if not check_build_assets():
+        sys.exit(1)
 
     # 清理旧产物，避免上次构建残留混淆
     if BUNDLE_DIR.is_dir():
