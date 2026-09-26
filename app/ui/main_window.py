@@ -127,6 +127,9 @@ class MainWindow(SplitFluentWindow):
 
         # 侧边栏展开宽度（按需调整，默认约 330）
         self.navigationInterface.panel.setExpandWidth(160)
+        # 移除左上角返回键：FluentWindow 基类默认 showReturnButton=True
+        # （供堆栈导航后退），本应用单层页面切换无导航历史，该键无用途
+        self.navigationInterface.setReturnButtonVisible(False)
 
         # 端口热插拔轮询（UI 线程轻量操作，仅依赖 consolePage）
         self._portTimer = QTimer(self)
