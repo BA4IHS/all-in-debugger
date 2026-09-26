@@ -195,37 +195,6 @@ LCD_CMD_COLMOD = 0x3A
 FLASH_CAP_LIMIT = 32 * 1024 * 1024   # Flash 区域操作/文件上限 32MB
 
 
-# ── 纯函数：芯片模式 → 工具子页 ──────────────────────────────────────
-
-# Ch347Page 工具子页 key（与页面 Pivot 注册及测试断言一致；不含未注册
-# 的 LCD——_build_lcd_tab 存在但未进 pivot，收编属独立需求）
-TOOL_TAB_KEYS = ("spi", "i2c", "i2cdev", "gpio", "flash", "eeprom")
-
-
-def mode_tool_tabs(chip_mode) -> set:
-    """芯片模式 → 本页可用工具子页 key 集合（S1/S2 拨码决定，权威表）：
-
-    - Mode0（OFF/OFF）：UART0+UART1 双串口 → 空集（工具去串口页）
-    - Mode1（ON/OFF） ：UART1+I2C+SPI (VCP) → 全集
-    - Mode2（OFF/ON） ：UART1+I2C+SPI (HID) → 全集
-    - Mode3（ON/ON）  ：UART1+JTAG → 空集（工具去 DAP 页）
-
-    None/缺键/越界/非数值等未知输入 fail-open 返回全集：宁可显示后由
-    DLL 报错，也不误藏可用工具（显隐只管引导，_need_ready 管操作闸门）。
-    返回集合而非 bool，为将来"部分子页可见"留扩展位——当前模式表只有
-    全显/全隐两态。
-    """
-    try:
-        m = int(chip_mode)
-    except (TypeError, ValueError):
-        return set(TOOL_TAB_KEYS)
-    if m in (0, 3):
-        return set()
-    if m in (1, 2):
-        return set(TOOL_TAB_KEYS)
-    return set(TOOL_TAB_KEYS)          # 越界模式同样 fail-open
-
-
 # ── 纯函数：HEX / 地址拆分 / JEDEC ───────────────────────────────────
 
 def parse_hex(text: str) -> bytes:
@@ -781,11 +750,7 @@ def _infor_to_dict(inf: DEVICE_INFOR) -> dict:
 def scan_devices() -> List[dict]:
     """索引 0~15 逐个试探：Open→GetDeviceInfor→Close。
 
-    全部模式（Mode0~3）一律如实返回，扫描层不做模式过滤：按模式
-    显隐工具子页并给出引导是 UI 层职责（见 mode_tool_tabs）。此前
-    过滤 Mode3 是因为误注释「Mode3=JTAG+I2C」——按拨码权威表
-    Mode3 实为 UART1+JTAG，且过滤会让 Mode3 设备从下拉框与
-    MCP ch347_scan 中消失，「去 DAP 页」引导永远触发不了。
+    过滤 ChipMode==3（Mode3 接口为 JTAG+I2C，无 SPI/GPIO）的设备。
 
     已被本进程 Ch347Device 占用的索引会被跳过：对同一句柄重复
     Open/Close 会破坏 CH347 驱动内部状态（底层为内核态驱动，
@@ -805,6 +770,8 @@ def scan_devices() -> List[dict]:
             # 也便于测试注入 fake api
             if api.CH347GetDeviceInfor(i, inf):
                 d = _infor_to_dict(inf)
+                if d["chip_mode"] == 3:
+                    continue
                 d["chip_type"] = int(api.CH347GetChipType(i))
                 d["chip_type_name"] = CHIP_TYPE_NAMES.get(
                     d["chip_type"], f"0x{d['chip_type']:02X}")
